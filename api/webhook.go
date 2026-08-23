@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,7 +13,6 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// نقطة البداية الأساسية للـ Webhook
 func Handler(w http.ResponseWriter, r *http.Request) {
 	botToken := os.Getenv("BOT_TOKEN")
 	if botToken == "" {
@@ -40,7 +40,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if update.Message != nil {
-		handleMessage(bot, update.Message)
+		handleMessage(bot, update.Message, botToken)
 	} else if update.CallbackQuery != nil {
 		handleCallbackQuery(bot, update.CallbackQuery)
 	}
@@ -49,8 +49,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "OK")
 }
 
-// معالجة الرسائل والأوامر
-func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string) {
 	if msg.IsCommand() && msg.Command() == "start" {
 		keyboard := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
@@ -67,12 +66,11 @@ func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if msg.ReplyToMessage != nil {
-		handleForceReply(bot, msg)
+		handleForceReply(bot, msg, botToken)
 		return
 	}
 }
 
-// معالجة الأزرار الشفافة (Inline Buttons)
 func handleCallbackQuery(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery) {
 	if query.Data == "start_copy" {
 		text := "للبدء في إنشاء حزمتك، أرسل لي اسماً للحزمة واليوزر المطلوب مفصولين بشرطة (-).\n\nمثال:\nحزمتي الجديدة - mycoolpack"
@@ -83,8 +81,7 @@ func handleCallbackQuery(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery) {
 	}
 }
 
-// معالجة الردود الإجبارية (ForceReply) بخطواتها المرتبة
-func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string) {
 	// الخطوة 1: استقبال الاسم واليوزر
 	if strings.Contains(msg.ReplyToMessage.Text, "أرسل لي اسماً للحزمة واليوزر") {
 		parts := strings.Split(msg.Text, "-")
@@ -104,7 +101,7 @@ func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	// الخطوة 2: استقبال الملصق وتنفيذ النسخ بشكل متزامن وآمن (بدون Goroutine لتجنب تجميد Vercel)
+	// الخطوة 2: استقبال الملصق وتنفيذ النسخ عبر HTTP Direct API
 	if strings.Contains(msg.ReplyToMessage.Text, "أرسل لي ملصقاً واحداً") {
 		if msg.Sticker == nil {
 			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا ليس ملصقاً! يرجى إرسال ملصق من الحزمة."))
@@ -133,7 +130,7 @@ func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري استنساخ الحزمة بالكامل... يرجى الانتظار قليلاً."))
 
-		err := copyStickerSetSync(bot, msg.Chat.ID, msg.From.ID, originalSetName, packTitle, finalPackName, msg.Sticker.Type)
+		err := copyStickerSetDirect(botToken, msg.From.ID, originalSetName, packTitle, finalPackName)
 		
 		if loadingMsg.MessageID != 0 {
 			bot.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, loadingMsg.MessageID))
@@ -151,10 +148,11 @@ func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 }
 
-// دالة النسخ المتزامنة مع الحماية ضد حظر تيليجرام (Rate Limit)
-func copyStickerSetSync(bot *tgbotapi.BotAPI, chatID int64, userID int64, originalSetName, newTitle, newName, stickerType string) error {
-	stickerSetConfig := tgbotapi.GetStickerSetConfig{Name: originalSetName}
-	originalSet, err := bot.GetStickerSet(stickerSetConfig)
+// دالة النسخ باستخدام طلبات HTTP المباشرة لـ Telegram API تفادياً لمشاكل الحزم
+func copyStickerSetDirect(botToken string, userID int64, originalSetName, newTitle, newName string) error {
+	// 1. جلب الحزمة الأصلية للحصول على الملصقات
+	bot, _ := tgbotapi.NewBotAPI(botToken)
+	originalSet, err := bot.GetStickerSet(tgbotapi.GetStickerSetConfig{Name: originalSetName})
 	if err != nil {
 		return fmt.Errorf("فشل جلب الحزمة الأصلية")
 	}
@@ -163,38 +161,45 @@ func copyStickerSetSync(bot *tgbotapi.BotAPI, chatID int64, userID int64, origin
 		return fmt.Errorf("الحزمة الأصلية فارغة")
 	}
 
-	firstSticker := originalSet.Stickers[0]
-	inputSticker := tgbotapi.InputSticker{
-		Sticker:   firstSticker.FileID,
-		EmojiList: []string{firstSticker.Emoji},
+	// 2. إنشاء الحزمة الجديدة باستخدام أول ملصق
+	first := originalSet.Stickers[0]
+	createURL := fmt.Sprintf("https://api.telegram.org/bot%s/createNewStickerSet", botToken)
+	
+	createPayload := map[string]interface{}{
+		"user_id": userID,
+		"name":    newName,
+		"title":   newTitle,
+		"sticker": map[string]interface{}{
+			"sticker":    first.FileID,
+			"emoji_list": []string{first.Emoji},
+		},
 	}
 
-	createConfig := tgbotapi.CreateNewStickerSetConfig{
-		UserID:        userID,
-		Name:          newName,
-		Title:         newTitle,
-		StickerFormat: stickerType,
-		Stickers:      []tgbotapi.InputSticker{inputSticker},
+	bodyBytes, _ := json.Marshal(createPayload)
+	resp, err := http.Post(createURL, "application/json", bytes.NewBuffer(bodyBytes))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("فشل إنشاء الحزمة الجديدة (ربما اليوزر مستخدم مسبقاً)")
 	}
+	resp.Body.Close()
 
-	_, err = bot.Request(createConfig)
-	if err != nil {
-		return fmt.Errorf("فشل إنشاء الحزمة (ربما اليوزر مستخدم مسبقاً)")
-	}
-
+	// 3. إضافة باقي الملصقات تباعاً
+	addURL := fmt.Sprintf("https://api.telegram.org/bot%s/addStickerToSet", botToken)
 	for i := 1; i < len(originalSet.Stickers); i++ {
-		currentSticker := originalSet.Stickers[i]
-		
-		addConfig := tgbotapi.AddStickerToSetConfig{
-			UserID: userID,
-			Name:   newName,
-			Sticker: tgbotapi.InputSticker{
-				Sticker:   currentSticker.FileID,
-				EmojiList: []string{currentSticker.Emoji},
+		current := originalSet.Stickers[i]
+		addPayload := map[string]interface{}{
+			"user_id": userID,
+			"name":    newName,
+			"sticker": map[string]interface{}{
+				"sticker":    current.FileID,
+				"emoji_list": []string{current.Emoji},
 			},
 		}
 
-		bot.Request(addConfig)
+		addBytes, _ := json.Marshal(addPayload)
+		addResp, err := http.Post(addURL, "application/json", bytes.NewBuffer(addBytes))
+		if err == nil {
+			addResp.Body.Close()
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
