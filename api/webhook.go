@@ -13,7 +13,6 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// يوزر الحقوق الثابت الذي يوضع بجانب اسم الحزمة
 const BotWatermark = "@I5I5Ie"
 
 type StickerPackSession struct {
@@ -80,7 +79,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		return
 	}
 
-	// 1. استقبال اسم الحزمة الذي يكتبه المستخدم ودمجه تلقائياً مع يوزر الحقوق الثابت @I5I5Ie
+	// 1. استقبال اسم الحزمة ودمجه مع يوزر الحقوق @I5I5Ie
 	if session.Step == "awaiting_title" {
 		if msg.Text == "" {
 			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال اسم نصي صحيح للحزمة."))
@@ -88,8 +87,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		}
 		
 		customTitle := strings.TrimSpace(msg.Text)
-		
-		// دمج اسم المستخدم مع يوزر الحقوق الثابت الخاص بك ليكون عنوان الحزمة النهائي
 		session.UserCustomTitle = fmt.Sprintf("%s | %s", customTitle, BotWatermark)
 		session.Step = "awaiting_sticker"
 
@@ -132,13 +129,11 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		session.AllEmojis = emojis
 		session.PackType = packType
 
-		// توليد رابط فريد للحزمة في تليجرام
 		finalPackName := fmt.Sprintf("pack_%d_by_%d", time.Now().Unix()%100000, userId)
 		session.CreatedPackName = finalPackName
 
-		loadingCreate, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري إنشاء الحزمة الجديدة في تليجرام مع حقوقك الثابتة..."))
+		loadingCreate, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري إنشاء الحزمة الجديدة في تليجرام..."))
 		
-		// إنشاء الحزمة مستخدمين العنوان المدمج (اسم المستخدم + @I5I5Ie)
 		err = createNewPackWithFirstSticker(botToken, userId, finalPackName, session.UserCustomTitle, session.PackType, fileIDs[0], emojis[0])
 		if loadingCreate.MessageID != 0 {
 			bot.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, loadingCreate.MessageID))
@@ -151,7 +146,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 			return
 		}
 
-		// تحديد حجم الدفعة الأولى (حتى 20 ملصقاً)
 		endIndex := 20
 		if endIndex > len(fileIDs) {
 			endIndex = len(fileIDs)
@@ -163,7 +157,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 
 		session.CurrentIdx = endIndex
 
-		// إذا كانت الحزمة قصيرة (أقل من أو تساوي 20 ملصقاً)، انتهينا بالكامل
 		if session.CurrentIdx >= len(fileIDs) {
 			delete(userSessions, userId)
 			doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بنجاح!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, finalPackName)
@@ -174,7 +167,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 			return
 		}
 
-		// إذا كانت الحزمة أكبر من 20 ملصقاً، ننتظر دفعة الاستكمال التالية
 		session.Step = "awaiting_next_batch"
 
 		nextText := fmt.Sprintf("✅ تم نسخ الدفعة الأولى (20 ملصقاً) بنجاح!\n\n🏷 عنوان الحزمة: `%s`\n\n👉 **أرسل أي ملصق من نفس الحزمة الآن لإكمال الدفعة التالية (20 ملصقاً إضافياً).**", session.UserCustomTitle)
@@ -185,7 +177,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		return
 	}
 
-	// 3. استكمال الدفعات التالية (كل دفعة 20 ملصقاً إضافياً حتى نهاية الحزمة)
+	// 3. استكمال الدفعات التالية (كل دفعة 20 ملصقاً)
 	if session.Step == "awaiting_next_batch" {
 		if msg.Sticker == nil {
 			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال ملصق للاستكمال."))
@@ -203,7 +195,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		addStickersBatch(botToken, userId, session.CreatedPackName, session.AllFileIDs, session.AllEmojis, startIndex, endIndex)
 		session.CurrentIdx = endIndex
 
-		// التحقق هل تم الانتهاء من جميع الملصقات للنهاية؟
 		if session.CurrentIdx >= len(session.AllFileIDs) {
 			finalName := session.CreatedPackName
 			finalTitle := session.UserCustomTitle
@@ -217,7 +208,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 			return
 		}
 
-		// إذا بقي المزيد من الملصقات، نطلب إرسال ملصق للدفعة التي تليها
 		nextText := fmt.Sprintf("✅ تمت إضافة دفعة جديدة بنجاح!\n\n👉 **أرسل ملصقاً مرة أخرى للاستكمال (الدفعة القادمة):**")
 		nextMsg := tgbotapi.NewMessage(msg.Chat.ID, nextText)
 		nextMsg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
@@ -233,7 +223,7 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 		),
 	)
 
-	welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص حصرياً لـ **نسخ حزم الملصقات** بدفعات دقيقة (20 ملصقاً بكل دفعة) مع حفظ حقوقك تلقائياً في اسم الحزمة (`%s`).\n\nاضغط الزر أدناه للبدء:", firstName, BotWatermark)
+	welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص حصرياً لـ **نسخ حزم الملصقات** بدفعات دقيقة (20 ملصقاً بكل دفعة) مع حفظ حقوقك في عنوان الحزمة (`%s`).\n\nاضغط الزر أدناه للبدء:", firstName, BotWatermark)
 	msg := tgbotapi.NewMessage(chatID, welcomeText)
 	msg.ReplyMarkup = keyboard
 	bot.Send(msg)
@@ -289,7 +279,7 @@ func fetchAllStickersFromSet(botToken, originalSetName string) ([]string, []stri
 	if first.IsVideo {
 		packType = "video"
 	} else if first.IsAnimated {
-		packType, _ = "animated", true
+		packType = "animated"
 	}
 
 	for _, s := range resStruct.Result.Stickers {
@@ -336,7 +326,7 @@ func createNewPackWithFirstSticker(botToken string, userID int64, newName, newTi
 	return nil
 }
 
-def addStickersBatch(botToken string, userID int64, newName string, fileIDs []string, emojis []string, start, end int) {
+func addStickersBatch(botToken string, userID int64, newName string, fileIDs []string, emojis []string, start, end int) {
 	addURL := fmt.Sprintf("https://api.telegram.org/bot%s/addStickerToSet", botToken)
 
 	for i := start; i < end && i < len(fileIDs); i++ {
