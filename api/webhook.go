@@ -68,11 +68,13 @@ func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			),
 		)
 
-		welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت متخصص في استنساخ حزم الملصقات ونقلها لتكون باسمك.\n\nاضغط على الزر بالأسفل للبدء:", msg.From.FirstName)
+		welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت متخصص في استنساخ حزم الملصقات ونقلها لتكون باسمك.\n\nاضغط على الزر بالأسفل للبدء.", msg.From.FirstName)
 		reply := tgbotapi.NewMessage(msg.Chat.ID, welcomeText)
 		reply.ReplyMarkup = keyboard
 
-		bot.Send(reply)
+		if _, err := bot.Send(reply); err != nil {
+			fmt.Printf("Error sending welcome message: %v\n", err)
+		}
 		return
 	}
 
@@ -85,47 +87,79 @@ func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 func handleCallbackQuery(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery) {
 	switch query.Data {
 	case "start_copy":
-		text := "للبدء في إنشاء حزمتك، أرسل لي اسماً للحزمة واليوزر المطلوب مفصولين بشرطة (-).\n\nمثال:\nحزمتي الجديدة - mycoolpack"
+		text := "للبدء في إنشاء حزمتك، أرسل لي اسماً للحزمة واليوزر المطلوب مفصولين بشرطة (-).\n\nمثال:\nحزمتي الجديدة - mycoollpack"
 		msg := tgbotapi.NewMessage(query.Message.Chat.ID, text)
 		msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
-		bot.Send(msg)
-		bot.Request(tgbotapi.NewCallback(query.ID, ""))
+		
+		if _, err := bot.Send(msg); err != nil {
+			fmt.Printf("Error sending start_copy message: %v\n", err)
+		}
+		
+		if _, err := bot.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
+			fmt.Printf("Error acknowledging callback: %v\n", err)
+		}
 
 	case "delete_sticker":
 		text := "أرسل لي الملصق الذي تريد حذفه من حزمتك (يجب أن يكون ملصقاً من حزمة أنشأتها هذا البوت)."
 		msg := tgbotapi.NewMessage(query.Message.Chat.ID, text)
 		msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
-		bot.Send(msg)
-		bot.Request(tgbotapi.NewCallback(query.ID, ""))
+		
+		if _, err := bot.Send(msg); err != nil {
+			fmt.Printf("Error sending delete_sticker message: %v\n", err)
+		}
+		
+		if _, err := bot.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
+			fmt.Printf("Error acknowledging callback: %v\n", err)
+		}
 	}
 }
 
 func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	// ✅ تحقق من عدم كون ReplyToMessage nil
+	if msg.ReplyToMessage == nil {
+		return
+	}
+	
 	replyText := msg.ReplyToMessage.Text
 
 	// الحالة 1: المستخدم أرسل الاسم واليوزر
 	if strings.Contains(replyText, "أرسل لي اسماً للحزمة واليوزر") {
 		parts := strings.Split(msg.Text, "-")
 		if len(parts) != 2 {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ الصيغة غير صحيحة. يرجى استخدام: الاسم - اليوزر"))
+			if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ الصيغة غير صحيحة. يرجى استخدام: الاسم - اليوزر")); err != nil {
+				fmt.Printf("Error sending format error message: %v\n", err)
+			}
 			return
 		}
 
 		packTitle := strings.TrimSpace(parts[0])
 		packName := strings.TrimSpace(parts[1])
 
+		// ✅ تحقق من عدم ترك أي منهما فارغ
+		if packTitle == "" || packName == "" {
+			if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ الاسم واليوزر لا يمكن أن يكونا فارغين.")); err != nil {
+				fmt.Printf("Error sending empty fields error: %v\n", err)
+			}
+			return
+		}
+
 		nextStepText := fmt.Sprintf("ممتاز! لقد اخترت:\nالاسم: %s\nاليوزر: %s\n\nالآن، أرسل لي ملصقاً واحداً من الحزمة التي تريد نسخها.", packTitle, packName)
 
 		replyMsg := tgbotapi.NewMessage(msg.Chat.ID, nextStepText)
 		replyMsg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
-		bot.Send(replyMsg)
+		
+		if _, err := bot.Send(replyMsg); err != nil {
+			fmt.Printf("Error sending next step message: %v\n", err)
+		}
 		return
 	}
 
 	// الحالة 2: المستخدم أرسل الملصق المراد نسخ حزمته
 	if strings.Contains(replyText, "أرسل لي ملصقاً واحداً") {
 		if msg.Sticker == nil {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا ليس ملصقاً! يرجى إرسال ملصق من الحزمة."))
+			if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا ليس ملصقاً! يرجى إرسال ملصق من الحزمة.")); err != nil {
+				fmt.Printf("Error sending not sticker message: %v\n", err)
+			}
 			return
 		}
 
@@ -140,20 +174,44 @@ func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			}
 		}
 
+		// ✅ تحقق من استخراج البيانات
+		if packTitle == "" || userPackName == "" {
+			if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ تعذر استخراج بيانات الحزمة. يرجى المحاولة مرة أخرى.")); err != nil {
+				fmt.Printf("Error sending extraction error: %v\n", err)
+			}
+			return
+		}
+
 		botInfo, err := bot.GetMe()
 		if err != nil {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ تعذر التحقق من بيانات البوت، حاول مرة أخرى."))
+			if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ تعذر التحقق من بيانات البوت، حاول مرة أخرى.")); err != nil {
+				fmt.Printf("Error sending bot info error: %v\n", err)
+			}
 			return
 		}
 		finalPackName := fmt.Sprintf("%s_by_%s", userPackName, botInfo.UserName)
 
-		originalSetName := msg.Sticker.SetName
-		if originalSetName == "" {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا الملصق لا ينتمي لأي حزمة."))
+		// ✅ تحقق من msg.Sticker وـ SetName
+		if msg.Sticker == nil || msg.Sticker.SetName == "" {
+			if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا الملصق لا ينتمي لأي حزمة.")); err != nil {
+				fmt.Printf("Error sending no set error: %v\n", err)
+			}
 			return
 		}
 
-		bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري استنساخ الحزمة... يرجى الانتظار (قد يستغرق الأمر بعض الوقت حسب حجم الحزمة)."))
+		originalSetName := msg.Sticker.SetName
+
+		// ✅ تحقق من msg.From
+		if msg.From == nil {
+			if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ تعذر الحصول على بيانات المستخدم.")); err != nil {
+				fmt.Printf("Error sending user data error: %v\n", err)
+			}
+			return
+		}
+
+		if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري استنساخ الحزمة... يرجى الانتظار (قد يستغرق الأمر بعض الوقت حسب حجم الحزمة).")); err != nil {
+			fmt.Printf("Error sending loading message: %v\n", err)
+		}
 
 		// تنفيذ متزامن — لا نستخدم goroutine هنا (راجع الملاحظة في Handler)
 		copyStickerSet(bot, msg.Chat.ID, msg.From.ID, originalSetName, packTitle, finalPackName, msg.Sticker.Type)
@@ -163,7 +221,9 @@ func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	// الحالة 3: المستخدم أرسل الملصق المراد حذفه
 	if strings.Contains(replyText, "أرسل لي الملصق الذي تريد حذفه") {
 		if msg.Sticker == nil {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا ليس ملصقاً! يرجى إرسال الملصق المراد حذفه."))
+			if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا ليس ملصقاً! يرجى إرسال الملصق المراد حذفه.")); err != nil {
+				fmt.Printf("Error sending not sticker message: %v\n", err)
+			}
 			return
 		}
 
@@ -171,11 +231,15 @@ func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			Sticker: msg.Sticker.FileID,
 		})
 		if err != nil {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ فشل حذف الملصق. تأكد أن الملصق ينتمي لحزمة أنشأها هذا البوت."))
+			if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ فشل حذف الملصق. تأكد أن الملصق ينتمي لحزمة أنشأها هذا البوت.")); err != nil {
+				fmt.Printf("Error sending delete fail message: %v\n", err)
+			}
 			return
 		}
 
-		bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "✅ تم حذف الملصق من الحزمة بنجاح."))
+		if _, err := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "✅ تم حذف الملصق من الحزمة بنجاح.")); err != nil {
+			fmt.Printf("Error sending delete success message: %v\n", err)
+		}
 		return
 	}
 }
@@ -185,12 +249,16 @@ func copyStickerSet(bot *tgbotapi.BotAPI, chatID int64, userID int64, originalSe
 	stickerSetConfig := tgbotapi.GetStickerSetConfig{Name: originalSetName}
 	originalSet, err := bot.GetStickerSet(stickerSetConfig)
 	if err != nil {
-		bot.Send(tgbotapi.NewMessage(chatID, "❌ حدث خطأ أثناء جلب الحزمة الأصلية."))
+		if _, err := bot.Send(tgbotapi.NewMessage(chatID, "❌ حدث خطأ أثناء جلب الحزمة الأصلية.")); err != nil {
+			fmt.Printf("Error sending fetch error: %v\n", err)
+		}
 		return
 	}
 
 	if len(originalSet.Stickers) == 0 {
-		bot.Send(tgbotapi.NewMessage(chatID, "❌ الحزمة الأصلية فارغة."))
+		if _, err := bot.Send(tgbotapi.NewMessage(chatID, "❌ الحزمة الأصلية فارغة.")); err != nil {
+			fmt.Printf("Error sending empty set error: %v\n", err)
+		}
 		return
 	}
 
@@ -209,7 +277,9 @@ func copyStickerSet(bot *tgbotapi.BotAPI, chatID int64, userID int64, originalSe
 	}
 
 	if _, err = bot.Request(createConfig); err != nil {
-		bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("❌ فشل إنشاء الحزمة. قد يكون اليوزر (%s) مستخدماً مسبقاً، أو حدث خطأ آخر.", newName)))
+		if _, err := bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("❌ فشل إنشاء الحزمة. قد يكون اليوزر (%s) مستخدماً مسبقاً، أو حدث خطأ آخر.", newName))); err != nil {
+			fmt.Printf("Error sending create fail message: %v\n", err)
+		}
 		return
 	}
 
@@ -248,5 +318,7 @@ func copyStickerSet(bot *tgbotapi.BotAPI, chatID int64, userID int64, originalSe
 	successMsg.ReplyMarkup = keyboard
 	successMsg.ParseMode = "Markdown"
 
-	bot.Send(successMsg)
+	if _, err := bot.Send(successMsg); err != nil {
+		fmt.Printf("Error sending success message: %v\n", err)
+	}
 }
