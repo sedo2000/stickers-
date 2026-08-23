@@ -3,10 +3,7 @@
   "builds": [
     {
       "src": "api/webhook.go",
-      "use": "@vercel/go",
-      "config": {
-        "maxDuration": 60
-      }
+      "use": "@vercel/go"
     }
   ],
   "routes": [
