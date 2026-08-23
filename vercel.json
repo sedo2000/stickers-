@@ -12,5 +12,9 @@
       "dest": "/api/webhook.go"
     }
   ],
-  "maxDuration": 60
+  "functions": {
+    "api/webhook.go": {
+      "maxDuration": 60
+    }
+  }
 }
