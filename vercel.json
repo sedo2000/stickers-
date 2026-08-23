@@ -3,7 +3,10 @@
   "builds": [
     {
       "src": "api/webhook.go",
-      "use": "@vercel/go"
+      "use": "@vercel/go",
+      "config": {
+        "maxDuration": 60
+      }
     }
   ],
   "routes": [
@@ -11,10 +14,5 @@
       "src": "/(.*)",
       "dest": "/api/webhook.go"
     }
-  ],
-  "functions": {
-    "api/webhook.go": {
-      "maxDuration": 60
-    }
-  }
+  ]
 }
