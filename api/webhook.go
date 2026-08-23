@@ -157,14 +157,15 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 
 func processAndCopyAllStickersWithTimer(bot *tgbotapi.BotAPI, botToken string, userId int64, session *StickerPackSession) {
 	total := session.TotalCount
-	delayPerSticker := 150 * time.Millisecond
+	
+	// تم تقليص وقت الانتظار إلى 50 مللي ثانية فقط لتكون العملية سريعة وخاطفة
+	delayPerSticker := 50 * time.Millisecond
 	initialSecs := (total * int(delayPerSticker)) / int(time.Second)
 	if initialSecs < 1 {
 		initialSecs = 1
 	}
 
-	// إرسال رسالة الحالة مع الزر الشفاف فوراً قبل بدء عملية الرفع
-	initialText := "⏳ **جاري نسخ الحزمة بالكامل...**\nيرجى الانتظار حتى ينتهي البوت من رفع جميع الملصقات."
+	initialText := "⚡ **جاري نسخ الحزمة بسرعة فائقة...**\nيرجى الانتظار لحظات."
 	initialKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("⌛ Loading: 1/%d (0%%) - متبقي ~%ds", total, initialSecs), "loading_status"),
@@ -195,7 +196,7 @@ func processAndCopyAllStickersWithTimer(bot *tgbotapi.BotAPI, botToken string, u
 
 	addURL := fmt.Sprintf("https://api.telegram.org/bot%s/addStickerToSet", botToken)
 
-	// رفع باقي الملصقات مع تحديث الزر الشفاف بالوقت والنسبة
+	// رفع باقي الملصقات بسرعة عالية
 	for i := 1; i < total; i++ {
 		addPayload := map[string]interface{}{
 			"user_id": userId,
@@ -217,7 +218,8 @@ func processAndCopyAllStickersWithTimer(bot *tgbotapi.BotAPI, botToken string, u
 		remainingSecs := (remainingStickers * int(delayPerSticker)) / int(time.Second)
 		percent := (processed * 100) / total
 
-		if statusMsgID != 0 && (i%3 == 0 || processed == total) {
+		// تحديث شريط التقدم كل 5 ملصقات لضمان السرعة القصوى بدون ضغط على تليجرام
+		if statusMsgID != 0 && (i%5 == 0 || processed == total) {
 			btnText := fmt.Sprintf("⌛ Loading: %d/%d (%d%%) - متبقي ~%ds", processed, total, percent, remainingSecs)
 			if remainingSecs <= 0 {
 				btnText = fmt.Sprintf("✨ جاري الانتهاء... (%d/%d - 100%)", processed, total)
@@ -239,7 +241,7 @@ func processAndCopyAllStickersWithTimer(bot *tgbotapi.BotAPI, botToken string, u
 		bot.Request(tgbotapi.NewDeleteMessage(session.ChatID, statusMsgID))
 	}
 
-	doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بنجاح!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, session.CreatedPackName)
+	doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بسرعة البرق!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, session.CreatedPackName)
 	doneMsg := tgbotapi.NewMessage(session.ChatID, doneText)
 	doneMsg.ParseMode = "Markdown"
 	bot.Send(doneMsg)
@@ -258,9 +260,9 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 		),
 	)
 
-	welcomeText := "أهلاً بك! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بالكامل تلقائياً** مع زر شفاف للعداد التنازلي.\n\nاضغط الزر أدناه للبدء:"
+	welcomeText := "أهلاً بك! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بسرعة فائقة** مع زر شفاف للعداد التنازلي.\n\nاضغط الزر أدناه للبدء:"
 	if firstName != "" {
-		welcomeText = fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بالكامل تلقائياً** مع زر شفاف للعداد التنازلي.\n\nاضغط الزر أدناه للبدء:", firstName)
+		welcomeText = fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بسرعة فائقة** مع زر شفاف للعداد التنازلي.\n\nاضغط الزر أدناه للبدء:", firstName)
 	}
 
 	msg := tgbotapi.NewMessage(chatID, welcomeText)
@@ -274,7 +276,7 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 	data := query.Data
 
 	if data == "loading_status" {
-		callbackConfig := tgbotapi.NewCallback(query.ID, "⏳ العملية جارية، يرجى الانتظار حتى اكتمال نسخ الحزمة...")
+		callbackConfig := tgbotapi.NewCallback(query.ID, "⚡ العملية تتم بسرعة فائقة، انتظر لحظات وتكتمل الحزمة!")
 		bot.Request(callbackConfig)
 		return
 	}
