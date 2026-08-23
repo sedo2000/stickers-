@@ -13,13 +13,11 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// هيكل مبسط لتخزين بيانات الحزم المؤقتة محلياً أو لإدارة العمليات
 type StickerPackSession struct {
-	Title     string
-	Name      string
-	Original  string
-	Step      string
-	StickersCount int
+	Title    string
+	Name     string
+	Original string
+	Step     string
 }
 
 var userSessions = make(map[int64]*StickerPackSession)
@@ -66,15 +64,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		return
 	}
 
-	// إذا كان رد على رسالة (ForceReply) لتنفيذ الخطوات المتسلسلة
 	if msg.ReplyToMessage != nil {
 		handleForceReplySteps(bot, msg, botToken)
-		return
-	}
-
-	// إذا أرسل المستخدم رابط حزمة لتعديلها أو حذف ملصق منها
-	if strings.Contains(msg.Text, "t.me/addstickers/") || strings.Contains(msg.Text, "telegram.me/addstickers/") {
-		handlePackManagement(bot, msg)
 		return
 	}
 }
@@ -87,7 +78,7 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 		),
 	)
 
-	welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت متكامل لإدارة واستنساخ حزم الملصقات بكل احترافية 💡\n\nاختر ما تحتاجه من الأزرار أدناه:", firstName)
+	welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت متخصص في استنساخ وتعديل حزم الملصقات 💡\n\nاختر من الأزرار أدناه:", firstName)
 	reply := tgbotapi.NewMessage(chatID, welcomeText)
 	reply.ReplyMarkup = keyboard
 
@@ -108,7 +99,7 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery)
 		bot.Request(tgbotapi.NewCallback(query.ID, ""))
 
 	} else if query.Data == "my_packs_menu" {
-		text := "قسم إدارة حزماتي 📂\nيمكنك هنا استعراض الحزم التي أنشأتها، التعديل على أسمائها، أو حذف ملصقات عبر إرسال رابط الحزمة المنسوخة هنا مباشرة."
+		text := "قسم حزماتي 📂\nأرسل رابط الحزمة المنسوخة هنا للتحكم بها أو حذف ملصقات منها."
 		msg := tgbotapi.NewMessage(chatId, text)
 		bot.Send(msg)
 		bot.Request(tgbotapi.NewCallback(query.ID, ""))
@@ -125,7 +116,6 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 
 	replyText := msg.ReplyToMessage.Text
 
-	// الخطوة 1: استلام الاسم
 	if strings.Contains(replyText, "الان ارسل اسم الحزمة الذي تريده") {
 		session.Title = strings.TrimSpace(msg.Text)
 		session.Step = "awaiting_name"
@@ -136,7 +126,6 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		return
 	}
 
-	// الخطوة 2: استلام المعرف (بدون قيود على الأطراف)
 	if strings.Contains(replyText, "الان ارسل معرف الحزمة الذي تريده") {
 		session.Name = strings.TrimSpace(msg.Text)
 		session.Step = "awaiting_sticker"
@@ -147,7 +136,6 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		return
 	}
 
-	// الخطوة 3: استلام الملصق لنسخ أول 15 ملصقاً
 	if strings.Contains(replyText, "ارسل ملصق من الحزمة التي تود نسخها") {
 		if msg.Sticker == nil {
 			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال ملصق صحيح من الحزمة المستهدفة."))
@@ -177,10 +165,10 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 			return
 		}
 
-		successText := fmt.Sprintf("تم نسخ الدفعة الأولى بنجاح ✅\n\nاسم الحزمة: %s\nرابط الحزمة: https://t.me/addstickers/%s\n\n- اعر أرسل الملصق مرة أخرى لإكمال نسخ بقية الملصقات.", session.Title, finalPackName)
+		successText := fmt.Sprintf("تم نسخ الدفعة الأولى بنجاح ✅\n\nاسم الحزمة: %s\nرابط الحزمة: https://t.me/addstickers/%s\n\n- اعد ارسال الملصق لاكمال نسخ بقية الملصقات .", session.Title, finalPackName)
 		
 		session.Step = "awaiting_completion"
-		session.Name = finalPackName // تحديث الاسم النهائي للمتابعة
+		session.Name = finalPackName
 
 		outMsg := tgbotapi.NewMessage(msg.Chat.ID, successText)
 		outMsg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
@@ -188,14 +176,13 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		return
 	}
 
-	// الخطوة 4: إعادة إرسال الملصق لإكمال باقي الملصقات
 	if strings.Contains(replyText, "اعد ارسال الملصق لاكمال نسخ بقية الملصقات") || session.Step == "awaiting_completion" {
 		if msg.Sticker == nil {
 			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال الملصق المطلوب لإتمام استكمال الحزمة."))
 			return
 		}
 
-		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري إكمال نسخ باقي الملصقات المتبقية..."))
+		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري إكمال نسخ باقي الملصقات..."))
 		
 		err := executeStickerCopyBatch(botToken, userId, session.Original, session.Title, session.Name, 15, 100)
 		
@@ -204,7 +191,7 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		}
 
 		if err != nil {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("⚠️ تنبيه أو اكتملت الحزمة: %s", err.Error())))
+			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("⚠️ تنبيه: %s", err.Error())))
 		}
 
 		finalDoneText := fmt.Sprintf("🎉 **تم الانتهاء من نسخ الحزمة بالكامل وإضافة كل الملصقات بنجاح!**\n\nرابط الحزمة النهائية:\nhttps://t.me/addstickers/%s", session.Name)
@@ -218,69 +205,73 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 	}
 }
 
-func handlePackManagement(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	// ميزة التعامل مع الروابط المحولة أو المرسلة للتحكم بالحزمة أو حذف ملصق
-	responseTxt := "🎛 تم رصد رابط الحزمة الخاصة بك.\nيمكنك الآن اختيار العملية المطلوبة:"
-	
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🗑 حذف ملصق مرسل", "delete_sticker_action"),
-			tgbotapi.NewInlineKeyboardButtonData("✏️ تعديل اسم الحزمة", "edit_pack_title"),
-		),
-	)
-
-	reply := tgbotapi.NewMessage(msg.Chat.ID, responseTxt)
-	reply.ReplyMarkup = keyboard
-	bot.Send(reply)
-}
-
 func executeStickerCopyBatch(botToken string, userID int64, originalSetName, newTitle, newName string, startIndex, maxCount int) error {
-	bot, err := tgbotapi.NewBotAPI(botToken)
+	getSetURL := fmt.Sprintf("https://api.telegram.org/bot%s/getStickerSet?name=%s", botToken, originalSetName)
+	resp, err := http.Get(getSetURL)
 	if err != nil {
-		return err
+		return fmt.Errorf("فشل الاتصال بجلب الحزمة الأصلية")
+	}
+	defer resp.Body.Close()
+
+	var resStruct struct {
+		Ok     bool `json:"ok"`
+		Result struct {
+			Stickers []struct {
+				FileID      string `json:"file_id"`
+				Emoji       string `json:"emoji"`
+				IsVideo     bool   `json:"is_video"`
+				IsAnimated  bool   `json:"is_animated"`
+			} `json:"stickers"`
+		} `json:"result"`
 	}
 
-	originalSet, err := bot.GetStickerSet(tgbotapi.GetStickerSetConfig{Name: originalSetName})
-	if err != nil {
-		return fmt.Errorf("فشل جلب الحزمة الأصلية من تيليجرام")
+	err = json.NewDecoder(resp.Body).Decode(&resStruct)
+	if err != nil || !resStruct.Ok || len(resStruct.Result.Stickers) == 0 {
+		return fmt.Errorf("فشل قراءة بيانات الحزمة الأصلية")
 	}
 
-	if len(originalSet.Stickers) == 0 {
-		return fmt.Errorf("الحزمة الأصلية فارغة تماماً")
-	}
+	stickers := resStruct.Result.Stickers
 
-	// إذا كانت هذه الدفعة الأولى (تبدأ من الفهرس 0)
 	if startIndex == 0 {
-		first := originalSet.Stickers[0]
+		first := stickers[0]
 		createURL := fmt.Sprintf("https://api.telegram.org/bot%s/createNewStickerSet", botToken)
 		
+		// تحديد نوع الحزمة (فيديو أو متحركة أو ثابتة) بناءً على الملصق الأول لتجنب خطأ تليجرام
+		stickerField := "png_sticker"
+		if first.IsVideo {
+			stickerField = "video_sticker"
+		} else if first.IsAnimated {
+			stickerField = "tgs_sticker"
+		}
+
 		createPayload := map[string]interface{}{
 			"user_id": userID,
 			"name":    newName,
 			"title":   newTitle,
-			"sticker": map[string]interface{}{
-				"sticker":    first.FileID,
-				"emoji_list": []string{first.Emoji},
-			},
+			stickerField: first.FileID,
+			"emojis":     first.Emoji,
 		}
 
 		bodyBytes, _ := json.Marshal(createPayload)
-		resp, err := http.Post(createURL, "application/json", bytes.NewBuffer(bodyBytes))
-		if err != nil || resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("فشل إنشاء الحزمة الجديدة في تيليجرام")
+		creResp, err := http.Post(createURL, "application/json", bytes.NewBuffer(bodyBytes))
+		if err != nil || creResp.StatusCode != http.StatusOK {
+			// محاولة قراءة سبب الخطأ من تيليجرام
+			respBody, _ := io.ReadAll(creResp.Body)
+			return fmt.Errorf("تليجرام رفض الإنشاء: %s", string(respBody))
 		}
-		resp.Body.Close()
-		startIndex = 1 // البدء من الملصق التالي
+		creResp.Body.Close()
+		startIndex = 1
 	}
 
 	endIndex := startIndex + maxCount
-	if endIndex > len(originalSet.Stickers) {
-		endIndex = len(originalSet.Stickers)
+	if endIndex > len(stickers) {
+		endIndex = len(stickers)
 	}
 
 	addURL := fmt.Sprintf("https://api.telegram.org/bot%s/addStickerToSet", botToken)
 	for i := startIndex; i < endIndex; i++ {
-		current := originalSet.Stickers[i]
+		current := stickers[i]
+		
 		addPayload := map[string]interface{}{
 			"user_id": userID,
 			"name":    newName,
@@ -291,11 +282,11 @@ func executeStickerCopyBatch(botToken string, userID int64, originalSetName, new
 		}
 
 		addBytes, _ := json.Marshal(addPayload)
-		resp, err := http.Post(addURL, "application/json", bytes.NewBuffer(addBytes))
+		addResp, err := http.Post(addURL, "application/json", bytes.NewBuffer(addBytes))
 		if err == nil {
-			resp.Body.Close()
+			addResp.Body.Close()
 		}
-		time.Sleep(120 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	return nil
