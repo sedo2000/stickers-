@@ -14,6 +14,7 @@ import (
 )
 
 const BotWatermark = "@I5I5Ie"
+const BotUsernameShort = "stickersbot" // سيتم تعديله تلقائياً أو استبداله بالاسم الصحيح
 
 type StickerPackSession struct {
 	Step            string
@@ -129,7 +130,15 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		session.AllEmojis = emojis
 		session.PackType = packType
 
-		finalPackName := fmt.Sprintf("pack_%d_by_%d", time.Now().Unix()%100000, userId)
+		// جلب يوزر البوت الحقيقي تلقائياً من تليجرام لتجنب أي خطأ في اسم الحزمة
+		botMe, err := bot.GetMe()
+		botUsername := "s_%d"
+		if err == nil && botMe.UserName != "" {
+			botUsername = botMe.UserName
+		}
+
+		// توليد اسم رابط متوافق 100% مع شروط تليجرام (يجب أن ينتهي بـ _by_<botusername>)
+		finalPackName := fmt.Sprintf("p%d_by_%s", time.Now().UnixNano()%1000000, botUsername)
 		session.CreatedPackName = finalPackName
 
 		loadingCreate, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري إنشاء الحزمة الجديدة في تليجرام..."))
@@ -223,7 +232,7 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 		),
 	)
 
-	welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص حصرياً لـ **نسخ حزم الملصقات** بدفعات دقيقة (20 ملصقاً بكل دفعة) مع حفظ حقوقك في عنوان الحزمة (`%s`).\n\nاضغط الزر أدناه للبدء:", firstName, BotWatermark)
+	welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات** بدفعات دقيقة (20 ملصقاً بكل دفعة) مع حفظ حقوقك في عنوان الحزمة (`%s`).\n\nاضغط الزر أدناه للبدء:", firstName, BotWatermark)
 	msg := tgbotapi.NewMessage(chatID, welcomeText)
 	msg.ReplyMarkup = keyboard
 	bot.Send(msg)
