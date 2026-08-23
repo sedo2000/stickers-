@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"os"
 	"strings"
@@ -15,16 +14,17 @@ import (
 )
 
 type StickerPackSession struct {
-	Title      string
-	Name       string
-	Original   string
-	Step       string
-	PackType   string // "png", "video", "animated"
-	AllFileIDs []string
-	AllEmojis  []string
-	CurrentIdx int
+	Step       string   // الخطوة الحالية بدقة متناهية
+	Title      string   // عنوان الحزمة
+	Name       string   // معرف الحزمة النهائي
+	Original   string   // معرف الحزمة الأصلية المستهدفة للنسخ
+	PackType   string   // نوع الحزمة: png, video, animated
+	AllFileIDs []string // قائمة جميع معرفات الملصقات المستخرجة
+	AllEmojis  []string // قائمة الرموز التعبيرية المطابقة
+	CurrentIdx int      // مؤشر التقدم الحالي في النسخ
 }
 
+// تخزين الجلسات للمستخدمين بنظام آمن
 var userSessions = make(map[int64]*StickerPackSession)
 var userPacksDB = make(map[int64][]string)
 
@@ -65,23 +65,25 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string) {
+	userId := msg.From.ID
+
+	// أمر البدء يصفر الجلسة تماماً
 	if msg.IsCommand() && msg.Command() == "start" {
-		// مسح أي جلسة قديمة لتبدأ من نظيف
-		delete(userSessions, msg.From.ID)
+		delete(userSessions, userId)
 		sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
 		return
 	}
 
-	// معالجة جلسات الخطوات النشطة للمستخدم بص بغض النظر عن الـ ReplyToMessage إذا كان في خطوة نسخ
-	userId := msg.From.ID
-	session, exists := userSessions[userId]
-	if exists {
-		handleActiveSession(bot, msg, botToken, session)
+	// التحقق المباشر من وجود جلسة نشطة للمستخدم (لتفادي أي التباس مع الـ start أو الـ Reply)
+	session, hasActiveSession := userSessions[userId]
+	if hasActiveSession {
+		handleSessionState(bot, msg, botToken, session)
 		return
 	}
 
+	// إذا لم تكن هناك جلسة ولكن هناك رد عبر ForceReply
 	if msg.ReplyToMessage != nil {
-		handleForceReplySteps(bot, msg, botToken)
+		handleForceReplyInitialSteps(bot, msg, botToken)
 		return
 	}
 }
@@ -94,7 +96,7 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 		),
 	)
 
-	welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت متخصص في استنساخ وتعديل حزم الملصقات 💡\n\nاختر من الأزرار أدناه:", firstName)
+	welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت متخصص في استنساخ وتعديل حزم الملصقات بكفاءة عالية 💡\n\nاختر من الأزرار أدناه:", firstName)
 	reply := tgbotapi.NewMessage(chatID, welcomeText)
 	reply.ReplyMarkup = keyboard
 
@@ -153,7 +155,8 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 	}
 }
 
-func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string) {
+// خطوات إدخال العنوان والمعرف الأولية
+func handleForceReplyInitialSteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string) {
 	userId := msg.From.ID
 	session, exists := userSessions[userId]
 	if !exists {
@@ -196,7 +199,7 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 
 	if strings.Contains(replyText, "الان ارسل معرف الحزمة الذي تريده") {
 		session.Name = strings.TrimSpace(msg.Text)
-		session.Step = "awaiting_sticker"
+		session.Step = "awaiting_sticker" // نقل الحالة بانتظار الملصق الأول
 
 		nextMsg := tgbotapi.NewMessage(msg.Chat.ID, "ارسل ملصق من الحزمة التي تود نسخها 😃")
 		nextMsg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
@@ -205,10 +208,11 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 	}
 }
 
-// معالجة الجلسة النشطة مباشرة لتجنب ضياع الملصقات عند استكمال النسخ
-func handleActiveSession(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string, session *StickerPackSession) {
+// معالجة حالات الجلسة المتقدمة (الملصق الأول واستكمال باقي الملصقات)
+func handleSessionState(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string, session *StickerPackSession) {
 	userId := msg.From.ID
 
+	// الحالة الأولى: انتظار إرسال الملصق لبدء النسخ
 	if session.Step == "awaiting_sticker" {
 		if msg.Sticker == nil {
 			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال ملصق صحيح من الحزمة المستهدفة."))
@@ -226,9 +230,8 @@ func handleActiveSession(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken s
 		finalPackName := fmt.Sprintf("%s_%d_by_%s", session.Name, time.Now().Unix()%10000, botInfo.UserName)
 		session.Name = finalPackName
 
-		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري جلب وقراءة كل الملصقات (بما فيها المتحركة والفيديو)..."))
+		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري جلب وقراءة جميع الملصقات (صور، متحركة، فيديو)..."))
 
-		// جلب جميع الملصقات من الحزمة الأصلية وتخزينها في الجلسة
 		fileIDs, emojis, packType, err := fetchAllStickersFromSet(botToken, originalSetName)
 		
 		if loadingMsg.MessageID != 0 {
@@ -236,18 +239,18 @@ func handleActiveSession(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken s
 		}
 
 		if err != nil || len(fileIDs) == 0 {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ فشل قراءة الحزمة الأصلية تأكد من الرابط."))
+			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ فشل قراءة بيانات الحزمة الأصلية. تأكد أن الرابط أو الملصق صحيح."))
 			delete(userSessions, userId)
+			sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
 			return
 		}
 
 		session.AllFileIDs = fileIDs
 		session.AllEmojis = emojis
 		session.PackType = packType
-		session.CurrentIdx = 0
 
 		// إنشاء الحزمة بالملصق الأول
-		loadingCreate, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري إنشاء الحزمة الجديدة..."))
+		loadingCreate, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري إنشاء الحزمة الجديدة في تليجرام..."))
 		err = createNewPackWithFirstSticker(botToken, userId, finalPackName, session.Title, session.PackType, session.AllFileIDs[0], session.AllEmojis[0])
 		
 		if loadingCreate.MessageID != 0 {
@@ -257,13 +260,13 @@ func handleActiveSession(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken s
 		if err != nil {
 			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("❌ خطأ إنشاء الحزمة: %s", err.Error())))
 			delete(userSessions, userId)
+			sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
 			return
 		}
 
-		session.CurrentIdx = 1
 		addUserPack(userId, finalPackName)
 
-		// إذا كانت الحزمة قصيرة (أقل من أو تساوي 15 ملصقاً)، نكملها فوراً دفعة واحدة
+		// إذا كانت الحزمة قصيرة (<= 15 ملصقاً)، يتم نسخها بالكامل دفعة واحدة
 		if len(session.AllFileIDs) <= 15 {
 			executeRemainingStickers(botToken, userId, session.Name, session.PackType, session.AllFileIDs, session.AllEmojis, 1)
 			
@@ -277,12 +280,13 @@ func handleActiveSession(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken s
 			return
 		}
 
-		// إذا كانت طويلة، ننسخ أول 15 ملصقاً أولاً ثم نطلب الملصق التالي للاستكمال
+		// إذا كانت طويلة، ننسخ أول 15 ملصقاً إضافياً (من المؤشر 1 إلى 16)
 		executeRemainingStickers(botToken, userId, session.Name, session.PackType, session.AllFileIDs, session.AllEmojis, 1)
-		session.CurrentIdx = 16 // وصلنا حتى 16
+		session.CurrentIdx = 16 // وصلنا للملصق رقم 16
 
-		successText := fmt.Sprintf("تم نسخ أول 15 ملصقاً بنجاح ✅\n\nاسم الحزمة: %s\nرابط الحزمة: https://t.me/addstickers/%s\n\n- أعد إرسال أي ملصق من الحزمة لإكمال نسخ باقي الملصقات تلقائياً.", session.Title, finalPackName)
-		session.Step = "awaiting_completion"
+		successText := fmt.Sprintf("تم نسخ أول دفعة (15 ملصقاً) بنجاح ✅\n\nاسم الحزمة: %s\nرابط الحزمة: https://t.me/addstickers/%s\n\n- أعد إرسال أي ملصق من الحزمة الآن لإكمال نسخ باقي الملصقات المتبقية.", session.Title, finalPackName)
+		
+		session.Step = "awaiting_completion" // تحديث الحالة بانتظار إكمال الباقي
 
 		outMsg := tgbotapi.NewMessage(msg.Chat.ID, successText)
 		outMsg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
@@ -290,15 +294,16 @@ func handleActiveSession(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken s
 		return
 	}
 
+	// الحالة الثانية: انتظار إرسال الملصق لاستكمال الدفعات الباقية حتى النهاية
 	if session.Step == "awaiting_completion" {
 		if msg.Sticker == nil {
 			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال الملصق المطلوب لإتمام استكمال الحزمة."))
 			return
 		}
 
-		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري إكمال نسخ باقي الملصقات..."))
+		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري إكمال نسخ باقي الملصقات للنهاية..."))
 
-		// نسخ الباقي حتى النهاية
+		// استكمال النسخ من المؤشر الحالي حتى نهاية القائمة بالكامل
 		executeRemainingStickers(botToken, userId, session.Name, session.PackType, session.AllFileIDs, session.AllEmojis, session.CurrentIdx)
 
 		if loadingMsg.MessageID != 0 {
@@ -316,7 +321,7 @@ func handleActiveSession(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken s
 	}
 }
 
-// جلب جميع الملصقات مع تحديد النوع بدقة (فيديو، متحركة تليجرام tgs، أو صور png)
+// جلب تفاصيل جميع الملصقات مع تحديد النوع بدقة (فيديو، متحركة تليجرام tgs، أو صور عادية)
 func fetchAllStickersFromSet(botToken, originalSetName string) ([]string, []string, string, error) {
 	getSetURL := fmt.Sprintf("https://api.telegram.org/bot%s/getStickerSet?name=%s", botToken, originalSetName)
 	resp, err := http.Get(getSetURL)
@@ -375,8 +380,6 @@ func createNewPackWithFirstSticker(botToken string, userID int64, newName, newTi
 		stickerField = "tgs_sticker"
 	}
 
-	// للحزم المتحركة tgs يجب تحميل الملف أولاً أو تمرير الـ file_id بشكل صحيح عبر multipart إذا لزم، 
-	// لكن لتليجرام يمكن تمرير الـ file_id مباشرة إذا كان نوع الملف متوافقاً
 	createPayload := map[string]interface{}{
 		"user_id":      userID,
 		"name":         newName,
@@ -425,11 +428,11 @@ func executeRemainingStickers(botToken string, userID int64, newName, packType s
 		if err == nil {
 			addResp.Body.Close()
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(120 * time.Millisecond)
 	}
 }
 
-// وظائف التحكم بالحزم الخاصة بقسم حزماتي
+// دوال إدارة قسم حزماتي والأزرار التفاعلية
 func sendUserPacksList(bot *tgbotapi.BotAPI, chatId int64, userId int64) {
 	packs := userPacksDB[userId]
 	if len(packs) == 0 {
