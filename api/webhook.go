@@ -20,7 +20,11 @@ type StickerPackSession struct {
 	Step     string
 }
 
+// تخزين مؤقت لجلسات العمليات والخطوات المتسلسلة
 var userSessions = make(map[int64]*StickerPackSession)
+
+// قاعدة بيانات وهمية مؤقتة لتخزين حزم المستخدمين (لتشغيل أزرار حزماتي وعرض الحزم)
+var userPacksDB = make(map[int64][]string) // userID -> list of pack names
 
 func Handler(w http.ResponseWriter, r *http.Request) {
 	botToken := os.Getenv("BOT_TOKEN")
@@ -51,7 +55,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	if update.Message != nil {
 		handleIncomingMessage(bot, update.Message, botToken)
 	} else if update.CallbackQuery != nil {
-		handleIncomingCallback(bot, update.CallbackQuery)
+		handleIncomingCallback(bot, update.CallbackQuery, botToken)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -64,8 +68,15 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		return
 	}
 
+	// التحقق إذا كان المستخدم في منتصف عملية نسخ (بواسطة ForceReply)
 	if msg.ReplyToMessage != nil {
 		handleForceReplySteps(bot, msg, botToken)
+		return
+	}
+
+	// إذا أرسل المستخدم رابط حزمة مباشرة لتحكم بها
+	if strings.Contains(msg.Text, "t.me/addstickers/") {
+		handleDirectPackLink(bot, msg)
 		return
 	}
 }
@@ -85,24 +96,55 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 	bot.Send(reply)
 }
 
-func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery) {
+func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery, botToken string) {
 	chatId := query.Message.Chat.ID
 	userId := query.From.ID
+	data := query.Data
 
-	if query.Data == "start_copy_flow" {
+	bot.Request(tgbotapi.NewCallback(query.ID, ""))
+
+	if data == "start_copy_flow" {
 		userSessions[userId] = &StickerPackSession{Step: "awaiting_title"}
 		
 		text := "الان ارسل اسم الحزمة الذي تريده 🗣"
 		msg := tgbotapi.NewMessage(chatId, text)
 		msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
 		bot.Send(msg)
-		bot.Request(tgbotapi.NewCallback(query.ID, ""))
 
-	} else if query.Data == "my_packs_menu" {
-		text := "قسم حزماتي 📂\nأرسل رابط الحزمة المنسوخة هنا للتحكم بها أو حذف ملصقات منها."
-		msg := tgbotapi.NewMessage(chatId, text)
+	} else if data == "my_packs_menu" {
+		sendUserPacksList(bot, chatId, userId)
+
+	} else if strings.HasPrefix(data, "manage_pack_") {
+		packName := strings.TrimPrefix(data, "manage_pack_")
+		sendPackControlPanel(bot, chatId, packName)
+
+	} else if strings.HasPrefix(data, "delete_pack_confirm_") {
+		packName := strings.TrimPrefix(data, "delete_pack_confirm_")
+		sendDeleteConfirmation(bot, chatId, packName)
+
+	} else if strings.HasPrefix(data, "do_delete_pack_") {
+		packName := strings.TrimPrefix(data, "do_delete_pack_")
+		removePackFromUser(userId, packName)
+		
+		editMsg := tgbotapi.NewEditMessageText(chatId, query.Message.MessageID, "🗑 تم حذف الحزمة من قائمتك بنجاح!")
+		bot.Send(editMsg)
+		sendHomeMenu(bot, chatId, query.From.FirstName)
+
+	} else if strings.HasPrefix(data, "edit_title_") {
+		packName := strings.TrimPrefix(data, "edit_title_")
+		userSessions[userId] = &StickerPackSession{Step: "editing_title", Name: packName}
+
+		msg := tgbotapi.NewMessage(chatId, "✏️ أرسل اسم الحزمة الجديد الآن:")
+		msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
 		bot.Send(msg)
-		bot.Request(tgbotapi.NewCallback(query.ID, ""))
+
+	} else if strings.HasPrefix(data, "del_sticker_") {
+		packName := strings.TrimPrefix(data, "del_sticker_")
+		userSessions[userId] = &StickerPackSession{Step: "deleting_sticker", Name: packName}
+
+		msg := tgbotapi.NewMessage(chatId, "🗑 أرسل الملصق الذي تريد حذفه من هذه الحزمة:")
+		msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
+		bot.Send(msg)
 	}
 }
 
@@ -110,12 +152,45 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 	userId := msg.From.ID
 	session, exists := userSessions[userId]
 	if !exists {
-		session = &StickerPackSession{Step: "awaiting_title"}
-		userSessions[userId] = session
+		// إذا لم تكن هناك جلسة نشطة، نبدأ من جديد لتفادي أخطاء الـ start
+		sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
+		return
 	}
 
 	replyText := msg.ReplyToMessage.Text
 
+	// حالات التعديل الخاصة بالحزمة الموجودة مسبقاً
+	if session.Step == "editing_title" {
+		newTitle := strings.TrimSpace(msg.Text)
+		// تنفيذ تغيير اسم الحزمة عبر API تليجرام
+		err := updateStickerSetTitle(botToken, session.Name, newTitle)
+		if err != nil {
+			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ فشل تغيير اسم الحزمة."))
+		} else {
+			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "✅ تم تغيير اسم الحزمة بنجاح!"))
+		}
+		delete(userSessions, userId)
+		sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
+		return
+	}
+
+	if session.Step == "deleting_sticker" {
+		if msg.Sticker == nil {
+			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال ملصق صحيح لحذفه."))
+			return
+		}
+		err := deleteStickerFromFile(botToken, msg.Sticker.FileID)
+		if err != nil {
+			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ حدث خطأ أثناء حذف الملصق."))
+		} else {
+			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "✅ تم مسح الملصق من الحزمة بنجاح!"))
+		}
+		delete(userSessions, userId)
+		sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
+		return
+	}
+
+	// خطوات إنشاء ونسخ الحزمة الأساسية
 	if strings.Contains(replyText, "الان ارسل اسم الحزمة الذي تريده") {
 		session.Title = strings.TrimSpace(msg.Text)
 		session.Step = "awaiting_name"
@@ -165,6 +240,9 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 			return
 		}
 
+		// حفظ الحزمة في قائمة المستخدم
+		addUserPack(userId, finalPackName)
+
 		successText := fmt.Sprintf("تم نسخ الدفعة الأولى بنجاح ✅\n\nاسم الحزمة: %s\nرابط الحزمة: https://t.me/addstickers/%s\n\n- اعد ارسال الملصق لاكمال نسخ بقية الملصقات .", session.Title, finalPackName)
 		
 		session.Step = "awaiting_completion"
@@ -205,6 +283,115 @@ func handleForceReplySteps(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 	}
 }
 
+func handleDirectPackLink(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	responseTxt := "🎛 تم رصد رابط الحزمة الخاصة بك.\nيمكنك التحكم بها من قسم (حزماتي) في القائمة الرئيسية."
+	bot.Send(tgbotapi.NewMessage(msg.Chat.ID, responseTxt))
+	sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
+}
+
+// إدارة قسم "حزماتي" وعرض الأزرار التفصيلية
+func sendUserPacksList(bot *tgbotapi.BotAPI, chatId int64, userId int64) {
+	packs := userPacksDB[userId]
+	if len(packs) == 0 {
+		bot.Send(tgbotapi.NewMessage(chatId, "📂 ليس لديك أي حزم مسجلة حتى الآن.\nقم بإنشاء أو نسخ حزمة جديدة أولاً."))
+		sendHomeMenu(bot, chatId, "")
+		return
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, packName := range packs {
+		btn := tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("📦 %s", packName), "manage_pack_"+packName)
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(btn))
+	}
+	
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 رجوع", "back_home")))
+
+	msg := tgbotapi.NewMessage(chatId, "📂 **حزماتي الخاصة بك:**\nاختر الحزمة التي تريد تعديلها أو التحكم بها:")
+	msg.ReplyMarkup = tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+	bot.Send(msg)
+}
+
+func sendPackControlPanel(bot *tgbotapi.BotAPI, chatId int64, packName string) {
+	text := fmt.Sprintf("⚙️ **لوحة تحكم الحزمة:**\n`%s`\n\nاختر الإجراء المناسب:", packName)
+	
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✏️ تعديل اسم الحزمة", "edit_title_"+packName),
+			tgbotapi.NewInlineKeyboardButtonData("🗑 حذف ملصق", "del_sticker_"+packName),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("❌ مسح الحزمة بالكامل", "delete_pack_confirm_"+packName),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("🔗 رابط الحزمة: %s", packName), "url_dummy"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 رجوع للحزم", "my_packs_menu"),
+		),
+	)
+
+	msg := tgbotapi.NewMessage(chatId, text)
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = keyboard
+	bot.Send(msg)
+}
+
+func sendDeleteConfirmation(bot *tgbotapi.BotAPI, chatId int64, packName string) {
+	text := fmt.Sprintf("⚠️ **هل أنت متأكد من رغبتك في حذف الحزمة بالكامل؟**\n`%s`", packName)
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ نعم، متأكد", "do_delete_pack_"+packName),
+			tgbotapi.NewInlineKeyboardButtonData("❌ إلغاء", "manage_pack_"+packName),
+		),
+	)
+
+	msg := tgbotapi.NewMessage(chatId, text)
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = keyboard
+	bot.Send(msg)
+}
+
+// مساعدة الذاكرة المؤقتة للحزم
+func addUserPack(userId int64, packName string) {
+	for _, p := range userPacksDB[userId] {
+		if p == packName {
+			return
+		}
+	}
+	userPacksDB[userId] = append(userPacksDB[userId], packName)
+}
+
+func removePackFromUser(userId int64, packName string) {
+	var newList []string
+	for _, p := range userPacksDB[userId] {
+		if p != packName {
+			newList = append(newList, p)
+		}
+	}
+	userPacksDB[userId] = newList
+}
+
+func updateStickerSetTitle(botToken, name, title string) error {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/setStickerSetTitle?name=%s&title=%s", botToken, name, title)
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+func deleteStickerFromFile(botToken, fileId string) error {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/deleteStickerFromSet?sticker=%s", botToken, fileId)
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
 func executeStickerCopyBatch(botToken string, userID int64, originalSetName, newTitle, newName string, startIndex, maxCount int) error {
 	getSetURL := fmt.Sprintf("https://api.telegram.org/bot%s/getStickerSet?name=%s", botToken, originalSetName)
 	resp, err := http.Get(getSetURL)
@@ -217,10 +404,10 @@ func executeStickerCopyBatch(botToken string, userID int64, originalSetName, new
 		Ok     bool `json:"ok"`
 		Result struct {
 			Stickers []struct {
-				FileID      string `json:"file_id"`
-				Emoji       string `json:"emoji"`
-				IsVideo     bool   `json:"is_video"`
-				IsAnimated  bool   `json:"is_animated"`
+				FileID     string `json:"file_id"`
+				Emoji      string `json:"emoji"`
+				IsVideo    bool   `json:"is_video"`
+				IsAnimated bool   `json:"is_animated"`
 			} `json:"stickers"`
 		} `json:"result"`
 	}
@@ -236,7 +423,6 @@ func executeStickerCopyBatch(botToken string, userID int64, originalSetName, new
 		first := stickers[0]
 		createURL := fmt.Sprintf("https://api.telegram.org/bot%s/createNewStickerSet", botToken)
 		
-		// تحديد نوع الحزمة (فيديو أو متحركة أو ثابتة) بناءً على الملصق الأول لتجنب خطأ تليجرام
 		stickerField := "png_sticker"
 		if first.IsVideo {
 			stickerField = "video_sticker"
@@ -245,17 +431,16 @@ func executeStickerCopyBatch(botToken string, userID int64, originalSetName, new
 		}
 
 		createPayload := map[string]interface{}{
-			"user_id": userID,
-			"name":    newName,
-			"title":   newTitle,
-			stickerField: first.FileID,
-			"emojis":     first.Emoji,
+			"user_id":      userID,
+			"name":         newName,
+			"title":        newTitle,
+			stickerField:   first.FileID,
+			"emojis":       first.Emoji,
 		}
 
 		bodyBytes, _ := json.Marshal(createPayload)
 		creResp, err := http.Post(createURL, "application/json", bytes.NewBuffer(bodyBytes))
 		if err != nil || creResp.StatusCode != http.StatusOK {
-			// محاولة قراءة سبب الخطأ من تيليجرام
 			respBody, _ := io.ReadAll(creResp.Body)
 			return fmt.Errorf("تليجرام رفض الإنشاء: %s", string(respBody))
 		}
