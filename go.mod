@@ -1,4 +1,4 @@
-module telegram-business-go
+module stickers
 
 go 1.22
 
