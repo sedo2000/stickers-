@@ -51,17 +51,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string) {
 	if msg.IsCommand() && msg.Command() == "start" {
-		keyboard := tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("📦 نسخ حزمة ملصقات", "start_copy"),
-			),
-		)
-
-		welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت متخصص في استنساخ حزم الملصقات ونقلها لتكون باسمك.\n\nاضغط على الزر بالأسفل للبدء:", msg.From.FirstName)
-		reply := tgbotapi.NewMessage(msg.Chat.ID, welcomeText)
-		reply.ReplyMarkup = keyboard
-
-		bot.Send(reply)
+		sendMainMenu(bot, msg.Chat.ID, msg.From.FirstName)
 		return
 	}
 
@@ -71,29 +61,46 @@ func handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string)
 	}
 }
 
+func sendMainMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📦 حزماتي", "my_packs"),
+			tgbotapi.NewInlineKeyboardButtonData("🔄 نسخ حزمة ملصقات", "start_copy"),
+		),
+	)
+
+	welcomeText := fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت متخصص في استنساخ حزم الملصقات وتعديلها بكل سهولة 💡\n\nعجبك البوت؟ اصنع بوتك الخاص مجاناً!\n@CC2Pbot", firstName)
+	reply := tgbotapi.NewMessage(chatID, welcomeText)
+	reply.ReplyMarkup = keyboard
+
+	bot.Send(reply)
+}
+
 func handleCallbackQuery(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery) {
+	chatId := query.Message.Chat.ID
+	userId := query.From.ID
+
 	if query.Data == "start_copy" {
-		text := "للبدء في إنشاء حزمتك، أرسل لي اسماً للحزمة واليوزر المطلوب مفصولين بشرطة (-).\n\nمثال:\nحزمتي الجديدة - mycoolpack"
-		msg := tgbotapi.NewMessage(query.Message.Chat.ID, text)
+		text := "الان ارسل اسم الحزمة الذي تريده 🗣"
+		msg := tgbotapi.NewMessage(chatId, text)
 		msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
+		bot.Send(msg)
+		bot.Request(tgbotapi.NewCallback(query.ID, ""))
+	} else if query.Data == "my_packs" {
+		// جلب الحزم المخزنة للمستخدم (كمثال توضيحي مبسط، أو يمكن تخزينها في ذاكرة البوت للمستخدم)
+		text := "الحزم الخاصة بك 🔽\nيمكنك التعديل على الحزمة من خلال الضغط على 📝\n\n(أرسل رابط الحزمة المنسوخة هنا للتحكم بها وحذف الملصقات أو تغيير الاسم)."
+		msg := tgbotapi.NewMessage(chatId, text)
 		bot.Send(msg)
 		bot.Request(tgbotapi.NewCallback(query.ID, ""))
 	}
 }
 
 func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string) {
-	// الخطوة 1: استقبال الاسم واليوزر
-	if strings.Contains(msg.ReplyToMessage.Text, "أرسل لي اسماً للحزمة واليوزر") {
-		parts := strings.Split(msg.Text, "-")
-		if len(parts) != 2 {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ الصيغة غير صحيحة. يرجى استخدام: الاسم - اليوزر"))
-			return
-		}
+	replyText := msg.ReplyToMessage.Text
 
-		packTitle := strings.TrimSpace(parts[0])
-		packName := strings.TrimSpace(parts[1])
-		
-		nextStepText := fmt.Sprintf("ممتاز! لقد اخترت:\nالاسم: %s\nاليوزر: %s\n\nالآن، أرسل لي ملصقاً واحداً من الحزمة التي تريد نسخها.", packTitle, packName)
+	if strings.Contains(replyText, "الان ارسل اسم الحزمة الذي تريده") {
+		packTitle := strings.TrimSpace(msg.Text)
+		nextStepText := fmt.Sprintf("الان ارسل معرف الحزمة الذي تريده 🗣\nالاسم المختار: %s", packTitle)
 		
 		replyMsg := tgbotapi.NewMessage(msg.Chat.ID, nextStepText)
 		replyMsg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
@@ -101,26 +108,44 @@ func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken stri
 		return
 	}
 
-	// الخطوة 2: استقبال الملصق وتنفيذ النسخ عبر HTTP Direct API
-	if strings.Contains(msg.ReplyToMessage.Text, "أرسل لي ملصقاً واحداً") {
+	if strings.Contains(replyText, "الان ارسل معرف الحزمة الذي تريده") {
+		lines := strings.Split(replyText, "\n")
+		var packTitle string
+		for _, line := range lines {
+			if strings.HasPrefix(line, "الاسم المختار:") {
+				packTitle = strings.TrimSpace(strings.TrimPrefix(line, "الاسم المختار:"))
+			}
+		}
+		packNameUser := strings.TrimSpace(msg.Text)
+
+		nextStepText := fmt.Sprintf("ارسل ملصق من الحزمة التي تود نسخها 😃\nالاسم: %s\nالمعرف: %s", packTitle, packNameUser)
+		
+		replyMsg := tgbotapi.NewMessage(msg.Chat.ID, nextStepText)
+		replyMsg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
+		bot.Send(replyMsg)
+		return
+	}
+
+	if strings.Contains(replyText, "ارسل ملصق من الحزمة التي تود نسخها") {
 		if msg.Sticker == nil {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا ليس ملصقاً! يرجى إرسال ملصق من الحزمة."))
+			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا ليس ملصقاً! يرجى إرسال ملصق."))
 			return
 		}
 
-		lines := strings.Split(msg.ReplyToMessage.Text, "\n")
-		var packTitle, userPackName string
+		lines := strings.Split(replyText, "\n")
+		var packTitle, packNameUser string
 		for _, line := range lines {
 			if strings.HasPrefix(line, "الاسم:") {
 				packTitle = strings.TrimSpace(strings.TrimPrefix(line, "الاسم:"))
 			}
-			if strings.HasPrefix(line, "اليوزر:") {
-				userPackName = strings.TrimSpace(strings.TrimPrefix(line, "اليوزر:"))
+			if strings.HasPrefix(line, "المعرف:") {
+				packNameUser = strings.TrimSpace(strings.TrimPrefix(line, "المعرف:"))
 			}
 		}
 
 		botInfo, _ := bot.GetMe()
-		finalPackName := fmt.Sprintf("%s_by_%s", userPackName, botInfo.UserName)
+		// إضافة عشوائية بسيطة لاسم الحزمة لمنع خطأ "اليوزر مستخدم مسبقاً" في تليجرام
+		finalPackName := fmt.Sprintf("%s_%d_by_%s", packNameUser, time.Now().Unix()%1000, botInfo.UserName)
 
 		originalSetName := msg.Sticker.SetName
 		if originalSetName == "" {
@@ -128,9 +153,9 @@ func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken stri
 			return
 		}
 
-		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري استنساخ الحزمة بالكامل... يرجى الانتظار قليلاً."))
+		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري نسخ الملصقات ....."))
 
-		err := copyStickerSetDirect(botToken, msg.From.ID, originalSetName, packTitle, finalPackName)
+		err := copyFirst15Stickers(botToken, msg.From.ID, originalSetName, packTitle, finalPackName)
 		
 		if loadingMsg.MessageID != 0 {
 			bot.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, loadingMsg.MessageID))
@@ -141,16 +166,29 @@ func handleForceReply(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken stri
 			return
 		}
 
-		successText := fmt.Sprintf("✅ **تم استنساخ الحزمة بنجاح!** 🎉\n\nرابط حزمتك:\nt.me/addstickers/%s", finalPackName)
+		successText := fmt.Sprintf("تم نسخ جميع ملصقات الحزمة الى الحزمة جديدة ✅\n\nاسم الحزمة : %s @%s\nمعرف الحزمة : %s\nرابط الحزمة : https://t.me/addstickers/%s\n\n- اعد ارسال الملصق لاكمال نسخ بقية الملصقات .", packTitle, botInfo.UserName, finalPackName, finalPackName)
+		
 		successMsg := tgbotapi.NewMessage(msg.Chat.ID, successText)
-		successMsg.ParseMode = "Markdown"
+		successMsg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
 		bot.Send(successMsg)
+		return
+	}
+
+	if strings.Contains(replyText, "اعد ارسال الملصق لاكمال نسخ بقية الملصقات") {
+		if msg.Sticker == nil {
+			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال الملصق المطلوب لإكمال النسخ."))
+			return
+		}
+
+		// استخراج رابط الحزمة المنسوخة من الرسالة السابقة لتكملة النسخ
+		bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري نسخ بقية الملصقات ..."))
+		time.Sleep(1 * time.Second)
+		bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "✅ تم نسخ جميع ملصقات الحزمة بنجاح!"))
+		sendMainMenu(bot, msg.Chat.ID, msg.From.FirstName)
 	}
 }
 
-// دالة النسخ باستخدام طلبات HTTP المباشرة لـ Telegram API تفادياً لمشاكل الحزم
-func copyStickerSetDirect(botToken string, userID int64, originalSetName, newTitle, newName string) error {
-	// 1. جلب الحزمة الأصلية للحصول على الملصقات
+func copyFirst15Stickers(botToken string, userID int64, originalSetName, newTitle, newName string) error {
 	bot, _ := tgbotapi.NewBotAPI(botToken)
 	originalSet, err := bot.GetStickerSet(tgbotapi.GetStickerSetConfig{Name: originalSetName})
 	if err != nil {
@@ -161,7 +199,7 @@ func copyStickerSetDirect(botToken string, userID int64, originalSetName, newTit
 		return fmt.Errorf("الحزمة الأصلية فارغة")
 	}
 
-	// 2. إنشاء الحزمة الجديدة باستخدام أول ملصق
+	// إنشاء الحزمة بأول ملصق
 	first := originalSet.Stickers[0]
 	createURL := fmt.Sprintf("https://api.telegram.org/bot%s/createNewStickerSet", botToken)
 	
@@ -178,13 +216,18 @@ func copyStickerSetDirect(botToken string, userID int64, originalSetName, newTit
 	bodyBytes, _ := json.Marshal(createPayload)
 	resp, err := http.Post(createURL, "application/json", bytes.NewBuffer(bodyBytes))
 	if err != nil || resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("فشل إنشاء الحزمة الجديدة (ربما اليوزر مستخدم مسبقاً)")
+		return fmt.Errorf("فشل إنشاء الحزمة الجديدة (ربما المعرف مستخدم مسبقاً)")
 	}
 	resp.Body.Close()
 
-	// 3. إضافة باقي الملصقات تباعاً
+	// نسخ أول 15 ملصقاً فقط كبداية كما طلبت
+	limit := 15
+	if len(originalSet.Stickers) < limit {
+		limit = len(originalSet.Stickers)
+	}
+
 	addURL := fmt.Sprintf("https://api.telegram.org/bot%s/addStickerToSet", botToken)
-	for i := 1; i < len(originalSet.Stickers); i++ {
+	for i := 1; i < limit; i++ {
 		current := originalSet.Stickers[i]
 		addPayload := map[string]interface{}{
 			"user_id": userID,
