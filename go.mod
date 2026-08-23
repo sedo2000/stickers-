@@ -1,4 +1,4 @@
-module webhook
+module stickers
 
 go 1.22
 
