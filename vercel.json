@@ -11,5 +11,6 @@
       "src": "/(.*)",
       "dest": "/api/webhook.go"
     }
-  ]
+  ],
+  "maxDuration": 60
 }
