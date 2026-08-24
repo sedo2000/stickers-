@@ -15,7 +15,7 @@ import (
 )
 
 const BotWatermark = "@I5I5Ie"
-const TargetBotUsername = "Cut88bot" // يوزر البوت بالشُرطات السفلية للرابط
+const TargetBotUsername = "Cut88bot" // الصيغة المطلوبة بالشُرطات السفلية
 
 type StickerPackSession struct {
 	Step            string
@@ -141,7 +141,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		session.PackType = packType
 		session.TotalCount = len(fileIDs)
 
-		// توليد اسم الحزمة مع الشُرطات السفلية المطلوبة بدقة
+		// الالتزام بالصيغة المطلوبة تماماً مع الشُرطات السفلية
 		finalPackName := fmt.Sprintf("p%d_by_%s", time.Now().UnixNano()%1000000, TargetBotUsername)
 		session.CreatedPackName = finalPackName
 		session.Step = "processing"
@@ -236,18 +236,18 @@ func processAndCopyAllStickersBatched(bot *tgbotapi.BotAPI, botToken string, use
 		}
 	}
 
-	// 3. مسح زر العداد الشفاف فور انتهاء الرفع بالكامل
+	// 3. مسح زر العداد الشفاف فوراً عند الاكتمال
 	if statusMsgID != 0 {
 		bot.Request(tgbotapi.NewDeleteMessage(session.ChatID, statusMsgID))
 	}
 
-	// 4. إرسال رابط الحزمة مباشرة للمستخدم تلقائياً فور الانتهاء مع الشُرطات السفلية
+	// 4. إرسال رابط الحزمة للمستخدم تلقائياً وفوراً مع الصيغة المطلوبة
 	doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بنجاح!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, session.CreatedPackName)
 	doneMsg := tgbotapi.NewMessage(session.ChatID, doneText)
 	doneMsg.ParseMode = "Markdown"
 	bot.Send(doneMsg)
 
-	// إنهاء الجلسة وإرسال القائمة الرئيسية بعدها
+	// مسح الجلسة وإرسال القائمة الرئيسية
 	sessionsLock.Lock()
 	delete(userSessions, userId)
 	sessionsLock.Unlock()
@@ -260,11 +260,14 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔄 نسخ حزمة ملصقات جديدة", "start_copy"),
 		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📁 حزماتي (إدارة الحزم)", "my_packs"),
+		),
 	)
 
-	welcomeText := "أهلاً بك! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بنظام الدفعات السريع**.\n\nاضغط الزر أدناه للبدء:"
+	welcomeText := "أهلاً بك! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات وإدارتها**.\n\nاختر ما يناسبك من الأزرار أدناه:"
 	if firstName != "" {
-		welcomeText = fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بنظام الدفعات السريع**.\n\nاضغط الزر أدناه للبدء:", firstName)
+		welcomeText = fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات وإدارتها**.\n\nاختر ما يناسبك من الأزرار أدناه:", firstName)
 	}
 
 	msg := tgbotapi.NewMessage(chatID, welcomeText)
@@ -278,7 +281,7 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 	data := query.Data
 
 	if data == "loading_status" {
-		callbackConfig := tgbotapi.NewCallback(query.ID, "🔄 العملية جارٍ تنفيذها، انتظر لحظات حتى تكتمل!")
+		callbackConfig := tgbotapi.NewCallback(query.ID, "🔄 العمليات جارية بأقصى سرعة، انتظر لحظات!")
 		bot.Request(callbackConfig)
 		return
 	}
@@ -294,6 +297,44 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 		msg.ParseMode = "Markdown"
 		msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
 		bot.Send(msg)
+		return
+	}
+
+	// قسم حزماتي والخيارات التابعة لها
+	if data == "my_packs" {
+		packsKeyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("✏️ تعديل عنوان الحزمة", "edit_title"),
+				tgbotapi.NewInlineKeyboardButtonData("🗑 حذف ملصق من الحزمة", "delete_sticker"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🔙 رجوع للقائمة الرئيسية", "back_home"),
+			),
+		)
+		msg := tgbotapi.NewMessage(chatId, "📁 **قسم حزماتي:**\nيمكنك التحكم بالحزم الخاصة بك من خلال الأزرار أدناه:")
+		msg.ParseMode = "Markdown"
+		msg.ReplyMarkup = packsKeyboard
+		bot.Send(msg)
+		return
+	}
+
+	if data == "edit_title" {
+		msg := tgbotapi.NewMessage(chatId, "✏️ لتعديل عنوان الحزمة، يرجى استخدام بوت التيليجرام الرسمي (`@Stickers`)، حيث يتيح أمر `/setpacktitle` تعديل العنوان بسهولة.")
+		msg.ParseMode = "Markdown"
+		bot.Send(msg)
+		return
+	}
+
+	if data == "delete_sticker" {
+		msg := tgbotapi.NewMessage(chatId, "🗑 لحذف ملصق من الحزمة، يرجى استخدام بوت التيليجرام الرسمي (`@Stickers`)، وإرسال أمر `/delsticker` للملصق المراد حذفه.")
+		msg.ParseMode = "Markdown"
+		bot.Send(msg)
+		return
+	}
+
+	if data == "back_home" {
+		sendHomeMenu(bot, chatId, "")
+		return
 	}
 }
 
