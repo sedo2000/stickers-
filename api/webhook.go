@@ -15,6 +15,7 @@ import (
 )
 
 const BotWatermark = "@I5I5Ie"
+const TargetBotUsername = "Cut88bot" // يوزر البوت بالشُرطات السفلية للرابط
 
 type StickerPackSession struct {
 	Step            string
@@ -140,13 +141,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		session.PackType = packType
 		session.TotalCount = len(fileIDs)
 
-		botMe, err := bot.GetMe()
-		botUsername := "stickersbot"
-		if err == nil && botMe.UserName != "" {
-			botUsername = botMe.UserName
-		}
-
-		finalPackName := fmt.Sprintf("p%d_by_%s", time.Now().UnixNano()%1000000, botUsername)
+		// توليد اسم الحزمة مع الشُرطات السفلية المطلوبة بدقة
+		finalPackName := fmt.Sprintf("p%d_by_%s", time.Now().UnixNano()%1000000, TargetBotUsername)
 		session.CreatedPackName = finalPackName
 		session.Step = "processing"
 
@@ -189,8 +185,7 @@ func processAndCopyAllStickersBatched(bot *tgbotapi.BotAPI, botToken string, use
 
 	addURL := fmt.Sprintf("https://api.telegram.org/bot%s/addStickerToSet", botToken)
 
-	// 2. نظام الدفعات المتوازية (Concurreny Batches) لرفع الملصقات بأعلى سرعة ممكنة وبأمان
-	// نقوم بتقسيم الملصقات المتبقية إلى دفعات (كل دفعة 5 ملصقات تعمل بشكل متزامن)
+	// 2. نظام الدفعات المتوازية
 	batchSize := 5
 	for i := 1; i < total; i += batchSize {
 		end := i + batchSize
@@ -241,15 +236,18 @@ func processAndCopyAllStickersBatched(bot *tgbotapi.BotAPI, botToken string, use
 		}
 	}
 
+	// 3. مسح زر العداد الشفاف فور انتهاء الرفع بالكامل
 	if statusMsgID != 0 {
 		bot.Request(tgbotapi.NewDeleteMessage(session.ChatID, statusMsgID))
 	}
 
-	doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بنظام الدفعات بنجاح!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, session.CreatedPackName)
+	// 4. إرسال رابط الحزمة مباشرة للمستخدم تلقائياً فور الانتهاء مع الشُرطات السفلية
+	doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بنجاح!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, session.CreatedPackName)
 	doneMsg := tgbotapi.NewMessage(session.ChatID, doneText)
 	doneMsg.ParseMode = "Markdown"
 	bot.Send(doneMsg)
 
+	// إنهاء الجلسة وإرسال القائمة الرئيسية بعدها
 	sessionsLock.Lock()
 	delete(userSessions, userId)
 	sessionsLock.Unlock()
@@ -264,9 +262,9 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 		),
 	)
 
-	welcomeText := "أهلاً بك! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بنظام الدفعات السريع** مع زر شفاف متطور.\n\nاضغط الزر أدناه للبدء:"
+	welcomeText := "أهلاً بك! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بنظام الدفعات السريع**.\n\nاضغط الزر أدناه للبدء:"
 	if firstName != "" {
-		welcomeText = fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بنظام الدفعات السريع** مع زر شفاف متطور.\n\nاضغط الزر أدناه للبدء:", firstName)
+		welcomeText = fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات بنظام الدفعات السريع**.\n\nاضغط الزر أدناه للبدء:", firstName)
 	}
 
 	msg := tgbotapi.NewMessage(chatID, welcomeText)
@@ -280,7 +278,7 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 	data := query.Data
 
 	if data == "loading_status" {
-		callbackConfig := tgbotapi.NewCallback(query.ID, "🔄 العمليات تجري بنظام الدفعات المتوازية، انتظر لحظات وتكتمل الحزمة!")
+		callbackConfig := tgbotapi.NewCallback(query.ID, "🔄 العملية جارٍ تنفيذها، انتظر لحظات حتى تكتمل!")
 		bot.Request(callbackConfig)
 		return
 	}
