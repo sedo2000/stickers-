@@ -153,7 +153,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 func processAndCopyAllStickersWithTransparentButton(bot *tgbotapi.BotAPI, botToken string, userId int64, session *StickerPackSession) {
 	total := session.TotalCount
 	
-	// رسالة العداد بالزر الشفاف الأولية
 	initialText := "📦 **جاري معالجة ورفع الحزمة (عادية، متحركة، مرئية)...**"
 	initialKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -170,7 +169,7 @@ func processAndCopyAllStickersWithTransparentButton(bot *tgbotapi.BotAPI, botTok
 		statusMsgID = statusMsg.MessageID
 	}
 
-	// 1. إنشاء الحزمة بالملصق الأول مع دعم النوع المناسب
+	// 1. إنشاء الحزمة بالملصق الأول مع التمرير الصحيح لنوع الحزمة (تجنب خطأ عدم تطابق الملف)
 	err = createNewPackWithFirstSticker(botToken, userId, session.CreatedPackName, session.UserCustomTitle, session.PackType, session.AllFileIDs[0], session.AllEmojis[0])
 	if err != nil {
 		if statusMsgID != 0 {
@@ -221,7 +220,6 @@ func processAndCopyAllStickersWithTransparentButton(bot *tgbotapi.BotAPI, botTok
 		processed := end
 		percent := (processed * 100) / total
 
-		// تحديث الزر الشفاف بالتقدم الحقيقي
 		if statusMsgID != 0 {
 			btnText := fmt.Sprintf("🔄 Batches: %d/%d (%d%%)", processed, total, percent)
 			if processed == total {
@@ -238,12 +236,12 @@ func processAndCopyAllStickersWithTransparentButton(bot *tgbotapi.BotAPI, botTok
 		}
 	}
 
-	// 3. حذف رسالة العداد الشفاف فوراً عند الاكتمال 100%
+	// 3. حذف زر العداد الشفاف فوراً عند الاكتمال 100%
 	if statusMsgID != 0 {
 		bot.Request(tgbotapi.NewDeleteMessage(session.ChatID, statusMsgID))
 	}
 
-	// 4. إرسال رابط الحزمة النهائي تلقائياً وفوراً
+	// 4. إرسال رابط الحزمة النهائي تلقائياً وفوراً مع الشُرطات السفلية المطلوبة
 	doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بنجاح!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, session.CreatedPackName)
 	doneMsg := tgbotapi.NewMessage(session.ChatID, doneText)
 	doneMsg.ParseMode = "Markdown"
@@ -302,7 +300,6 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 		return
 	}
 
-	// قسم حزماتي للإدارة الداخلية
 	if data == "my_packs" {
 		packsKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
@@ -373,7 +370,7 @@ func fetchAllStickersFromSet(botToken, originalSetName string) ([]string, []stri
 	if first.IsVideo {
 		packType = "video"
 	} else if first.IsAnimated {
-		packType = "animated" // دعم الملصقات المتحركة TGS
+		packType = "animated"
 	}
 
 	for _, s := range resStruct.Result.Stickers {
@@ -391,11 +388,12 @@ func fetchAllStickersFromSet(botToken, originalSetName string) ([]string, []stri
 func createNewPackWithFirstSticker(botToken string, userID int64, newName, newTitle, packType, fileID, emoji string) error {
 	createURL := fmt.Sprintf("https://api.telegram.org/bot%s/createNewStickerSet", botToken)
 
+	// التحديد الدقيق لحقل الملصق بناءً على نوع الحزمة المكتشفة لمنع خطأ Bad Request
 	stickerField := "png_sticker"
 	if packType == "video" {
 		stickerField = "video_sticker"
 	} else if packType == "animated" {
-		stickerField = "tgs_sticker" // دعم إنشاء الحزم المتحركة
+		stickerField = "tgs_sticker"
 	}
 
 	createPayload := map[string]interface{}{
