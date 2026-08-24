@@ -145,24 +145,32 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		session.CreatedPackName = finalPackName
 		session.Step = "processing"
 
-		go processAndCopyAllStickersWithTextProgress(bot, botToken, userId, session)
+		go processAndCopyAllStickersWithTransparentButton(bot, botToken, userId, session)
 		return
 	}
 }
 
-func processAndCopyAllStickersWithTextProgress(bot *tgbotapi.BotAPI, botToken string, userId int64, session *StickerPackSession) {
+func processAndCopyAllStickersWithTransparentButton(bot *tgbotapi.BotAPI, botToken string, userId int64, session *StickerPackSession) {
 	total := session.TotalCount
 	
-	// رسالة نصية تحتوي على نسب مئوية تصاعدية بدل الزر الشفاف
-	statusMsgConfig := tgbotapi.NewMessage(session.ChatID, "🚀 **جاري نسخ الحزمة (بما فيها المتحركة والمرئية):**\n⏳ التقدم: 1 / "+fmt.Sprint(total)+" (0%)")
-	statusMsgConfig.ParseMode = "Markdown"
-	statusMsg, err := bot.Send(statusMsgConfig)
+	// رسالة العداد بالزر الشفاف الأولية
+	initialText := "📦 **جاري معالجة ورفع الحزمة (عادية، متحركة، مرئية)...**"
+	initialKeyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("🔄 Batches: 1/%d (0%%)", total), "loading_status"),
+		),
+	)
+
+	msgConfig := tgbotapi.NewMessage(session.ChatID, initialText)
+	msgConfig.ParseMode = "Markdown"
+	msgConfig.ReplyMarkup = initialKeyboard
+	statusMsg, err := bot.Send(msgConfig)
 	var statusMsgID int
 	if err == nil {
 		statusMsgID = statusMsg.MessageID
 	}
 
-	// 1. إنشاء الحزمة بالملصق الأول مع دعم النوع المناسب (عادي، متحرك، مرئي)
+	// 1. إنشاء الحزمة بالملصق الأول مع دعم النوع المناسب
 	err = createNewPackWithFirstSticker(botToken, userId, session.CreatedPackName, session.UserCustomTitle, session.PackType, session.AllFileIDs[0], session.AllEmojis[0])
 	if err != nil {
 		if statusMsgID != 0 {
@@ -213,25 +221,29 @@ func processAndCopyAllStickersWithTextProgress(bot *tgbotapi.BotAPI, botToken st
 		processed := end
 		percent := (processed * 100) / total
 
-		// تحديث النص بالتصاعد الرقمي المستمر
+		// تحديث الزر الشفاف بالتقدم الحقيقي
 		if statusMsgID != 0 {
-			progressText := fmt.Sprintf("🚀 **جاري نسخ الحزمة (بما فيها المتحركة والمرئية):**\n⏳ التقدم: %d / %d (%d%%)", processed, total, percent)
+			btnText := fmt.Sprintf("🔄 Batches: %d/%d (%d%%)", processed, total, percent)
 			if processed == total {
-				progressText = fmt.Sprintf("✨ **اكتمل رفع الحزمة بنجاح!** (%d / %d - 100%)", processed, total)
+				btnText = fmt.Sprintf("✨ اكتملت الحزمة بنجاح! (%d/%d - 100%)", processed, total)
 			}
 
-			editMsg := tgbotapi.NewEditMessageText(session.ChatID, statusMsgID, progressText)
-			editMsg.ParseMode = "Markdown"
-			bot.Send(editMsg)
+			newKeyboard := tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData(btnText, "loading_status"),
+				),
+			)
+			editMarkup := tgbotapi.NewEditMessageReplyMarkup(session.ChatID, statusMsgID, newKeyboard)
+			bot.Send(editMarkup)
 		}
 	}
 
-	// 3. حذف رسالة النص التصاعدي نهائياً فور اكتمال العداد 100%
+	// 3. حذف رسالة العداد الشفاف فوراً عند الاكتمال 100%
 	if statusMsgID != 0 {
 		bot.Request(tgbotapi.NewDeleteMessage(session.ChatID, statusMsgID))
 	}
 
-	// 4. إرسال رابط الحزمة النهائي تلقائياً وفوراً مع الشُرطات السفلية
+	// 4. إرسال رابط الحزمة النهائي تلقائياً وفوراً
 	doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بنجاح!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, session.CreatedPackName)
 	doneMsg := tgbotapi.NewMessage(session.ChatID, doneText)
 	doneMsg.ParseMode = "Markdown"
@@ -270,6 +282,12 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 	userId := query.From.ID
 	data := query.Data
 
+	if data == "loading_status" {
+		callbackConfig := tgbotapi.NewCallback(query.ID, "🔄 العمليات جارية بأقصى سرعة، انتظر لحظات حتى تصل 100%!")
+		bot.Request(callbackConfig)
+		return
+	}
+
 	bot.Request(tgbotapi.NewCallback(query.ID, ""))
 
 	if data == "start_copy" {
@@ -284,7 +302,7 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 		return
 	}
 
-	// قسم حزماتي للتحكم المباشر من البوت
+	// قسم حزماتي للإدارة الداخلية
 	if data == "my_packs" {
 		packsKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
@@ -303,7 +321,7 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 	}
 
 	if data == "edit_title" {
-		msg := tgbotapi.NewMessage(chatId, "✏️ لتعديل عنوان الحزمة من داخل البوت، أرسل اسم الحزمة (رابطها أو اسمها المختصر) متبوعاً بالعنوان الجديد بالصيغة التالية:\n`/settitle name New Title`")
+		msg := tgbotapi.NewMessage(chatId, "✏️ لتعديل عنوان الحزمة من داخل البوت، أرسل اسم الحزمة أو رابطها متبوعاً بالعنوان الجديد.")
 		msg.ParseMode = "Markdown"
 		bot.Send(msg)
 		return
@@ -349,13 +367,13 @@ func fetchAllStickersFromSet(botToken, originalSetName string) ([]string, []stri
 
 	var fileIDs []string
 	var emojis []string
-	packType := "png" // النوع الافتراضي
+	packType := "png"
 
 	first := resStruct.Result.Stickers[0]
 	if first.IsVideo {
 		packType = "video"
 	} else if first.IsAnimated {
-		packType = "animated" // يدعم الملصقات المتحركة TGS
+		packType = "animated" // دعم الملصقات المتحركة TGS
 	}
 
 	for _, s := range resStruct.Result.Stickers {
@@ -377,7 +395,7 @@ func createNewPackWithFirstSticker(botToken string, userID int64, newName, newTi
 	if packType == "video" {
 		stickerField = "video_sticker"
 	} else if packType == "animated" {
-		stickerField = "tgs_sticker" // دعم كامل لتوليد الحزم المتحركة
+		stickerField = "tgs_sticker" // دعم إنشاء الحزم المتحركة
 	}
 
 	createPayload := map[string]interface{}{
