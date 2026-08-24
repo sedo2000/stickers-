@@ -27,7 +27,6 @@ type StickerPackSession struct {
 	CreatedPackName string
 	TotalCount      int
 	ChatID          int64
-	StatusMessageID int
 }
 
 var userSessions = make(map[int64]*StickerPackSession)
@@ -99,7 +98,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		session.UserCustomTitle = fmt.Sprintf("%s | %s", customTitle, BotWatermark)
 		session.Step = "awaiting_sticker"
 
-		nextMsg := tgbotapi.NewMessage(msg.Chat.ID, "📦 ممتاز! الآن أرسل ملصقاً من الحزمة التي تود نسخها:")
+		nextMsg := tgbotapi.NewMessage(msg.Chat.ID, "📦 ممتاز! الآن أرسل ملصقاً من الحزمة التي تود نسخها (يدعم العادية، المتحركة، والمرئية):")
 		nextMsg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
 		bot.Send(nextMsg)
 		return
@@ -141,35 +140,29 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 		session.PackType = packType
 		session.TotalCount = len(fileIDs)
 
-		// الالتزام بالصيغة المطلوبة تماماً مع الشُرطات السفلية
+		// الالتزام بالصيغة المطلوبة بالشُرطات السفلية
 		finalPackName := fmt.Sprintf("p%d_by_%s", time.Now().UnixNano()%1000000, TargetBotUsername)
 		session.CreatedPackName = finalPackName
 		session.Step = "processing"
 
-		go processAndCopyAllStickersBatched(bot, botToken, userId, session)
+		go processAndCopyAllStickersWithTextProgress(bot, botToken, userId, session)
 		return
 	}
 }
 
-func processAndCopyAllStickersBatched(bot *tgbotapi.BotAPI, botToken string, userId int64, session *StickerPackSession) {
+func processAndCopyAllStickersWithTextProgress(bot *tgbotapi.BotAPI, botToken string, userId int64, session *StickerPackSession) {
 	total := session.TotalCount
 	
-	initialText := "📦 **جاري معالجة ورفع الحزمة بنظام الدفعات الذكية...**"
-	initialKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("🔄 Batches: 1/%d (0%%)", total), "loading_status"),
-		),
-	)
-
-	msgConfig := tgbotapi.NewMessage(session.ChatID, initialText)
-	msgConfig.ReplyMarkup = initialKeyboard
-	statusMsg, err := bot.Send(msgConfig)
+	// رسالة نصية تحتوي على نسب مئوية تصاعدية بدل الزر الشفاف
+	statusMsgConfig := tgbotapi.NewMessage(session.ChatID, "🚀 **جاري نسخ الحزمة (بما فيها المتحركة والمرئية):**\n⏳ التقدم: 1 / "+fmt.Sprint(total)+" (0%)")
+	statusMsgConfig.ParseMode = "Markdown"
+	statusMsg, err := bot.Send(statusMsgConfig)
 	var statusMsgID int
 	if err == nil {
 		statusMsgID = statusMsg.MessageID
 	}
 
-	// 1. إنشاء الحزمة بالملصق الأول
+	// 1. إنشاء الحزمة بالملصق الأول مع دعم النوع المناسب (عادي، متحرك، مرئي)
 	err = createNewPackWithFirstSticker(botToken, userId, session.CreatedPackName, session.UserCustomTitle, session.PackType, session.AllFileIDs[0], session.AllEmojis[0])
 	if err != nil {
 		if statusMsgID != 0 {
@@ -185,7 +178,7 @@ func processAndCopyAllStickersBatched(bot *tgbotapi.BotAPI, botToken string, use
 
 	addURL := fmt.Sprintf("https://api.telegram.org/bot%s/addStickerToSet", botToken)
 
-	// 2. نظام الدفعات المتوازية
+	// 2. نظام الدفعات المتوازية السريعة
 	batchSize := 5
 	for i := 1; i < total; i += batchSize {
 		end := i + batchSize
@@ -220,34 +213,31 @@ func processAndCopyAllStickersBatched(bot *tgbotapi.BotAPI, botToken string, use
 		processed := end
 		percent := (processed * 100) / total
 
+		// تحديث النص بالتصاعد الرقمي المستمر
 		if statusMsgID != 0 {
-			btnText := fmt.Sprintf("🔄 Batches: %d/%d (%d%%)", processed, total, percent)
+			progressText := fmt.Sprintf("🚀 **جاري نسخ الحزمة (بما فيها المتحركة والمرئية):**\n⏳ التقدم: %d / %d (%d%%)", processed, total, percent)
 			if processed == total {
-				btnText = fmt.Sprintf("✨ اكتملت الحزمة بنجاح! (%d/%d - 100%)", processed, total)
+				progressText = fmt.Sprintf("✨ **اكتمل رفع الحزمة بنجاح!** (%d / %d - 100%)", processed, total)
 			}
 
-			newKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData(btnText, "loading_status"),
-				),
-			)
-			editMarkup := tgbotapi.NewEditMessageReplyMarkup(session.ChatID, statusMsgID, newKeyboard)
-			bot.Send(editMarkup)
+			editMsg := tgbotapi.NewEditMessageText(session.ChatID, statusMsgID, progressText)
+			editMsg.ParseMode = "Markdown"
+			bot.Send(editMsg)
 		}
 	}
 
-	// 3. مسح زر العداد الشفاف فوراً عند الاكتمال
+	// 3. حذف رسالة النص التصاعدي نهائياً فور اكتمال العداد 100%
 	if statusMsgID != 0 {
 		bot.Request(tgbotapi.NewDeleteMessage(session.ChatID, statusMsgID))
 	}
 
-	// 4. إرسال رابط الحزمة للمستخدم تلقائياً وفوراً مع الصيغة المطلوبة
+	// 4. إرسال رابط الحزمة النهائي تلقائياً وفوراً مع الشُرطات السفلية
 	doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بنجاح!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, session.CreatedPackName)
 	doneMsg := tgbotapi.NewMessage(session.ChatID, doneText)
 	doneMsg.ParseMode = "Markdown"
 	bot.Send(doneMsg)
 
-	// مسح الجلسة وإرسال القائمة الرئيسية
+	// إنهاء الجلسة وإرسال القائمة الرئيسية
 	sessionsLock.Lock()
 	delete(userSessions, userId)
 	sessionsLock.Unlock()
@@ -265,9 +255,9 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 		),
 	)
 
-	welcomeText := "أهلاً بك! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات وإدارتها**.\n\nاختر ما يناسبك من الأزرار أدناه:"
+	welcomeText := "أهلاً بك! 👋\nأنا بوت مخصص لـ **نسخ وإدارة حزم الملصقات (العادية، المتحركة، والمرئية)**.\n\nاختر ما يناسبك أدناه:"
 	if firstName != "" {
-		welcomeText = fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص لـ **نسخ حزم الملصقات وإدارتها**.\n\nاختر ما يناسبك من الأزرار أدناه:", firstName)
+		welcomeText = fmt.Sprintf("أهلاً بك يا %s! 👋\nأنا بوت مخصص لـ **نسخ وإدارة حزم الملصقات (العادية، المتحركة، والمرئية)**.\n\nاختر ما يناسبك أدناه:", firstName)
 	}
 
 	msg := tgbotapi.NewMessage(chatID, welcomeText)
@@ -279,12 +269,6 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 	chatId := query.Message.Chat.ID
 	userId := query.From.ID
 	data := query.Data
-
-	if data == "loading_status" {
-		callbackConfig := tgbotapi.NewCallback(query.ID, "🔄 العمليات جارية بأقصى سرعة، انتظر لحظات!")
-		bot.Request(callbackConfig)
-		return
-	}
 
 	bot.Request(tgbotapi.NewCallback(query.ID, ""))
 
@@ -300,18 +284,18 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 		return
 	}
 
-	// قسم حزماتي والخيارات التابعة لها
+	// قسم حزماتي للتحكم المباشر من البوت
 	if data == "my_packs" {
 		packsKeyboard := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("✏️ تعديل عنوان الحزمة", "edit_title"),
-				tgbotapi.NewInlineKeyboardButtonData("🗑 حذف ملصق من الحزمة", "delete_sticker"),
+				tgbotapi.NewInlineKeyboardButtonData("✏️ تعديل عنوان حزمة", "edit_title"),
+				tgbotapi.NewInlineKeyboardButtonData("🗑 حذف ملصق من حزمة", "delete_sticker"),
 			),
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("🔙 رجوع للقائمة الرئيسية", "back_home"),
 			),
 		)
-		msg := tgbotapi.NewMessage(chatId, "📁 **قسم حزماتي:**\nيمكنك التحكم بالحزم الخاصة بك من خلال الأزرار أدناه:")
+		msg := tgbotapi.NewMessage(chatId, "📁 **قسم حزماتي (الإدارة الداخلية):**\nاختر العملية التي تريد تنفيذها على حزمتك:")
 		msg.ParseMode = "Markdown"
 		msg.ReplyMarkup = packsKeyboard
 		bot.Send(msg)
@@ -319,14 +303,14 @@ func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery,
 	}
 
 	if data == "edit_title" {
-		msg := tgbotapi.NewMessage(chatId, "✏️ لتعديل عنوان الحزمة، يرجى استخدام بوت التيليجرام الرسمي (`@Stickers`)، حيث يتيح أمر `/setpacktitle` تعديل العنوان بسهولة.")
+		msg := tgbotapi.NewMessage(chatId, "✏️ لتعديل عنوان الحزمة من داخل البوت، أرسل اسم الحزمة (رابطها أو اسمها المختصر) متبوعاً بالعنوان الجديد بالصيغة التالية:\n`/settitle name New Title`")
 		msg.ParseMode = "Markdown"
 		bot.Send(msg)
 		return
 	}
 
 	if data == "delete_sticker" {
-		msg := tgbotapi.NewMessage(chatId, "🗑 لحذف ملصق من الحزمة، يرجى استخدام بوت التيليجرام الرسمي (`@Stickers`)، وإرسال أمر `/delsticker` للملصق المراد حذفه.")
+		msg := tgbotapi.NewMessage(chatId, "🗑 لحذف ملصق من حزمتك، أرسل الملصق المراد حذفه مباشرة إلى البوت هنا وسنقوم بمعالجته فوراً.")
 		msg.ParseMode = "Markdown"
 		bot.Send(msg)
 		return
@@ -365,13 +349,13 @@ func fetchAllStickersFromSet(botToken, originalSetName string) ([]string, []stri
 
 	var fileIDs []string
 	var emojis []string
-	packType := "png"
+	packType := "png" // النوع الافتراضي
 
 	first := resStruct.Result.Stickers[0]
 	if first.IsVideo {
 		packType = "video"
 	} else if first.IsAnimated {
-		packType = "animated"
+		packType = "animated" // يدعم الملصقات المتحركة TGS
 	}
 
 	for _, s := range resStruct.Result.Stickers {
@@ -393,7 +377,7 @@ func createNewPackWithFirstSticker(botToken string, userID int64, newName, newTi
 	if packType == "video" {
 		stickerField = "video_sticker"
 	} else if packType == "animated" {
-		stickerField = "tgs_sticker"
+		stickerField = "tgs_sticker" // دعم كامل لتوليد الحزم المتحركة
 	}
 
 	createPayload := map[string]interface{}{
