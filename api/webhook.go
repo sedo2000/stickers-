@@ -19,7 +19,7 @@ const TargetBotUsername = "Cut88bot"
 
 type StickerPackSession struct {
 	Step            string
-	Mode            string // "static" أو "animated"
+	Mode            string
 	UserCustomTitle string
 	OriginalSetName string
 	PackType        string
@@ -142,25 +142,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken
 			return
 		}
 
-		// التحقق من توافق النوع مع القسم الذي اختاره المستخدم
-		if session.Mode == "static" && packType != "png" {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ أنت في قسم **الملصقات الثابتة**، لكن الحزمة المرسلة متحركة أو مرئية! يرجى اختيار القسم المخصص للمتحركة."))
-			sessionsLock.Lock()
-			delete(userSessions, userId)
-			sessionsLock.Unlock()
-			sendHomeMenu(bot, msg.Chat.ID, "")
-			return
-		}
-
-		if session.Mode == "animated" && packType == "png" {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ أنت في قسم **الملصقات المتحركة**، لكن الحزمة المرسلة ثابتة (عادية)! يرجى اختيار قسم الملصقات الثابتة."))
-			sessionsLock.Lock()
-			delete(userSessions, userId)
-			sessionsLock.Unlock()
-			sendHomeMenu(bot, msg.Chat.ID, "")
-			return
-		}
-
 		session.AllFileIDs = fileIDs
 		session.AllEmojis = emojis
 		session.PackType = packType
@@ -209,55 +190,40 @@ func processAndCopyAllStickersWithTransparentButton(bot *tgbotapi.BotAPI, botTok
 
 	addURL := fmt.Sprintf("https://api.telegram.org/bot%s/addStickerToSet", botToken)
 
-	batchSize := 5
-	for i := 1; i < total; i += batchSize {
-		end := i + batchSize
-		if end > total {
-			end = total
+	// إضافة الملصقات تدريجياً مع تحديث الشريط فوراً
+	for i := 1; i < total; i++ {
+		addPayload := map[string]interface{}{
+			"user_id": userId,
+			"name":    session.CreatedPackName,
 		}
 
-		var wg sync.WaitGroup
-		for j := i; j < end; j++ {
-			wg.Add(1)
-			go func(index int) {
-				defer wg.Done()
-
-				addPayload := map[string]interface{}{
-					"user_id": userId,
-					"name":    session.CreatedPackName,
-				}
-
-				if session.PackType == "video" {
-					addPayload["sticker"] = map[string]interface{}{
-						"sticker":    session.AllFileIDs[index],
-						"emoji_list": []string{session.AllEmojis[index]},
-					}
-				} else if session.PackType == "animated" {
-					addPayload["sticker"] = map[string]interface{}{
-						"sticker":    session.AllFileIDs[index],
-						"emoji_list": []string{session.AllEmojis[index]},
-					}
-				} else {
-					addPayload["sticker"] = map[string]interface{}{
-						"sticker":    session.AllFileIDs[index],
-						"emoji_list": []string{session.AllEmojis[index]},
-					}
-				}
-
-				addBytes, _ := json.Marshal(addPayload)
-				resp, err := http.Post(addURL, "application/json", bytes.NewBuffer(addBytes))
-				if err == nil {
-					resp.Body.Close()
-				}
-			}(j)
+		// التصحيح الجذري لهيكل الملصقات المتحركة والمرئية والثابتة
+		if session.PackType == "video" {
+			addPayload["video_sticker"] = map[string]interface{}{
+				"sticker":    session.AllFileIDs[i],
+				"emoji_list": []string{session.AllEmojis[i]},
+			}
+		} else if session.PackType == "animated" {
+			addPayload["tgs_sticker"] = map[string]interface{}{
+				"sticker": session.AllFileIDs[i],
+			}
+			addPayload["emojis"] = session.AllEmojis[i]
+		} else {
+			addPayload["png_sticker"] = session.AllFileIDs[i]
+			addPayload["emojis"] = session.AllEmojis[i]
 		}
-		wg.Wait()
 
-		processed := end
+		addBytes, _ := json.Marshal(addPayload)
+		resp, err := http.Post(addURL, "application/json", bytes.NewBuffer(addBytes))
+		if err == nil {
+			resp.Body.Close()
+		}
+
+		// تحديث شريط التقدم بعد كل ملصق يتم رفعه
+		processed := i + 1
 		percent := (processed * 100) / total
 
 		if statusMsgID != 0 {
-			// توليد شريط التقدم المرئي
 			filled := percent / 10
 			if filled > 10 {
 				filled = 10
@@ -450,9 +416,9 @@ func createNewPackWithFirstSticker(botToken string, userID int64, newName, newTi
 		}
 	} else if packType == "animated" {
 		createPayload["tgs_sticker"] = map[string]interface{}{
-			"sticker":    fileID,
-			"emoji_list": []string{emoji},
+			"sticker": fileID,
 		}
+		createPayload["emojis"] = emoji
 	} else {
 		createPayload["png_sticker"] = fileID
 		createPayload["emojis"] = emoji
