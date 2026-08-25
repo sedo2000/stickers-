@@ -1,12 +1,20 @@
+
+// api/webhook.go
+// Webhook handler for Telegram bot hosted on Vercel.
+// يتعامل مع طلبات الويب هوك ويدير جلسات المستخدمين لعملية نسخ حزم الملصقات.
+
 package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"log"
+	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,433 +22,105 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// الثوابت المطلوبة للحقوق واسم البوت
-const BotWatermark = "@I5I5Ie"
-const TargetBotUsername = "Cut88bot"
+// ==================== تعريفات الحالة والجلسة ====================
 
-// هيكل الجلسة لكل مستخدم
-type StickerPackSession struct {
-	Step            string
-	Mode            string
-	UserCustomTitle string
-	OriginalSetName string
-	PackType        string
-	AllFileIDs      []string
-	AllEmojis       []string
-	CreatedPackName string
-	TotalCount      int
-	ChatID          int64
-}
-
-// إدارة الجلسات في الذاكرة مع حماية التزامن (Mutex)
-var userSessions = make(map[int64]*StickerPackSession)
-var sessionsLock sync.Mutex
-
-// نقطة الدخول الرئيسية للـ Webhook
-func Handler(w http.ResponseWriter, r *http.Request) {
-	botToken := os.Getenv("BOT_TOKEN")
-	if botToken == "" {
-		http.Error(w, "Bot token not configured", http.StatusInternalServerError)
-		return
-	}
-
-	bot, err := tgbotapi.NewBotAPI(botToken)
-	if err != nil {
-		http.Error(w, "Failed to create bot", http.StatusInternalServerError)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)
-		return
-	}
-
-	var update tgbotapi.Update
-	err = json.Unmarshal(body, &update)
-	if err != nil {
-		http.Error(w, "Failed to unmarshal update", http.StatusBadRequest)
-		return
-	}
-
-	// توجيه التحديث سواء كان رسالة أو ضغطة زر
-	if update.Message != nil {
-		handleIncomingMessage(bot, update.Message, botToken)
-	} else if update.CallbackQuery != nil {
-		handleIncomingCallback(bot, update.CallbackQuery, botToken)
-	}
-
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "OK")
-}
-
-// معالجة الرسائل الواردة
-func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, botToken string) {
-	userId := msg.From.ID
-
-	// أمر البداية /start
-	if msg.IsCommand() && msg.Command() == "start" {
-		clearSession(userId)
-		sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
-		return
-	}
-
-	sessionsLock.Lock()
-	session, exists := userSessions[userId]
-	sessionsLock.Unlock()
-
-	// إذا لم تكن هناك جلسة، نعرض القائمة الرئيسية
-	if !exists {
-		sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
-		return
-	}
-
-	// خطوة 1: استقبال عنوان الحزمة
-	if session.Step == "awaiting_title" {
-		if msg.Text == "" {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال اسم نصي صحيح للحزمة."))
-			return
-		}
-
-		// إضافة الحقوق للعنوان
-		customTitle := strings.TrimSpace(msg.Text)
-		session.UserCustomTitle = fmt.Sprintf("%s | %s", customTitle, BotWatermark)
-		session.Step = "awaiting_sticker"
-
-		modeText := "الثابتة (PNG)"
-		if session.Mode == "animated" {
-			modeText = "المتحركة (TGS / Video)"
-		}
-
-		nextMsg := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("📦 ممتاز! الآن أرسل ملصقاً من حزمة **%s** التي تود نسخها:", modeText))
-		nextMsg.ParseMode = "Markdown"
-		bot.Send(nextMsg)
-		return
-	}
-
-	// خطوة 2: استقبال الملصق للنسخ
-	if session.Step == "awaiting_sticker" {
-		if msg.Sticker == nil {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ يرجى إرسال ملصق صحيح من تليجرام."))
-			return
-		}
-
-		originalSetName := msg.Sticker.SetName
-		if originalSetName == "" {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ هذا الملصق لا ينتمي لأي حزمة."))
-			return
-		}
-
-		session.OriginalSetName = originalSetName
-		session.ChatID = msg.Chat.ID
-
-		loadingMsg, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "⏳ جاري فحص الحزمة الأصلية..."))
-
-		fileIDs, emojis, packType, err := fetchAllStickersFromSet(botToken, originalSetName)
-		if loadingMsg.MessageID != 0 {
-			bot.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, loadingMsg.MessageID))
-		}
-
-		if err != nil || len(fileIDs) == 0 {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ فشل قراءة الحزمة الأصلية."))
-			clearSession(userId)
-			sendHomeMenu(bot, msg.Chat.ID, msg.From.FirstName)
-			return
-		}
-
-		// التحقق من نوع الحزمة بناءً على اختيار المستخدم
-		if session.Mode == "static" && packType != "static" {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ أنت في قسم **الملصقات الثابتة**، لكن الحزمة المرسلة متحركة أو مرئية! يرجى العودة للقسم المناسب."))
-			clearSession(userId)
-			sendHomeMenu(bot, msg.Chat.ID, "")
-			return
-		}
-
-		if session.Mode == "animated" && packType == "static" {
-			bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ أنت في قسم **الملصقات المتحركة**، لكن الحزمة المرسلة ثابتة (عادية)! يرجى العودة للقسم المناسب."))
-			clearSession(userId)
-			sendHomeMenu(bot, msg.Chat.ID, "")
-			return
-		}
-
-		session.AllFileIDs = fileIDs
-		session.AllEmojis = emojis
-		session.PackType = packType
-		session.TotalCount = len(fileIDs)
-
-		// توليد اسم الحزمة بالشكل المطلوب
-		session.CreatedPackName = fmt.Sprintf("p%d_by_%s", time.Now().UnixNano()%1000000, TargetBotUsername)
-		session.Step = "processing"
-
-		// بدء عملية المعالجة والرفع
-		go processAndCopyAllStickers(bot, botToken, userId, session)
-		return
+// UserState يخزن حالة المستخدم أثناء التفاعل مع البوت.
+type UserState struct {
+	Action      string // "awaiting_title", "awaiting_sticker", "cloning"
+	PackType    string // "static", "animated", "video"
+	Title       string
+	PackName    string
+	StickerSet  *tgbotapi.StickerSet
+	Stickers    []tgbotapi.Sticker // قائمة الملصقات المسترجعة
+	Index       int                // الفهرس الحالي أثناء الرفع
+	ProgressMsg struct {
+		ChatID int64
+		MsgID  int
 	}
 }
 
-// دالة لمعالجة ورفع الملصقات مع تحديث شريط التقدم
-func processAndCopyAllStickers(bot *tgbotapi.BotAPI, botToken string, userId int64, session *StickerPackSession) {
-	total := session.TotalCount
+// المتغيرات العامة مع أقفال للتعامل المتزامن.
+var (
+	bot      *tgbotapi.BotAPI
+	sessions = make(map[int64]*UserState)
+	mu       sync.RWMutex
+)
 
-	// إرسال رسالة شريط التقدم الأولية
-	initialKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⏳ [░░░░░░░░░░] 0% (1/"+fmt.Sprintf("%d", total)+")", "loading_status"),
-		),
-	)
+// ==================== الدوال المساعدة ====================
 
-	msgConfig := tgbotapi.NewMessage(session.ChatID, "📦 **جاري معالجة ورفع الحزمة...**")
-	msgConfig.ParseMode = "Markdown"
-	msgConfig.ReplyMarkup = initialKeyboard
-	statusMsg, err := bot.Send(msgConfig)
-	
-	var statusMsgID int
-	if err == nil {
-		statusMsgID = statusMsg.MessageID
-	}
-
-	// إنشاء الحزمة باستخدام أول ملصق
-	err = createNewPackWithFirstSticker(botToken, userId, session.CreatedPackName, session.UserCustomTitle, session.PackType, session.AllFileIDs[0], session.AllEmojis[0])
-	if err != nil {
-		if statusMsgID != 0 {
-			bot.Request(tgbotapi.NewDeleteMessage(session.ChatID, statusMsgID))
-		}
-		bot.Send(tgbotapi.NewMessage(session.ChatID, fmt.Sprintf("❌ خطأ أثناء إنشاء الحزمة: %s", err.Error())))
-		clearSession(userId)
-		sendHomeMenu(bot, session.ChatID, "")
-		return
-	}
-
-	addURL := fmt.Sprintf("https://api.telegram.org/bot%s/addStickerToSet", botToken)
-
-	// رفع باقي الملصقات وتحديث الشريط
-	for i := 1; i < total; i++ {
-		addPayload := map[string]interface{}{
-			"user_id": userId,
-			"name":    session.CreatedPackName,
-		}
-
-		// الهيكل الدقيق لتفادي خطأ 400 (Bad Request)
-		if session.PackType == "video" {
-			addPayload["video_sticker"] = map[string]interface{}{
-				"sticker":    session.AllFileIDs[i],
-				"emoji_list": []string{session.AllEmojis[i]},
-			}
-		} else if session.PackType == "animated" {
-			addPayload["tgs_sticker"] = map[string]interface{}{
-				"sticker": session.AllFileIDs[i],
-			}
-			addPayload["emojis"] = session.AllEmojis[i]
-		} else {
-			addPayload["png_sticker"] = session.AllFileIDs[i]
-			addPayload["emojis"] = session.AllEmojis[i]
-		}
-
-		addBytes, _ := json.Marshal(addPayload)
-		resp, err := http.Post(addURL, "application/json", bytes.NewBuffer(addBytes))
-		if err == nil {
-			resp.Body.Close()
-		}
-
-		// تحديث الشريط التفاعلي (بدون time.Sleep لتحقيق أقصى سرعة)
-		processed := i + 1
-		percent := (processed * 100) / total
-
-		if statusMsgID != 0 && processed < total {
-			filled := percent / 10
-			if filled > 10 { filled = 10 }
-			bar := strings.Repeat("█", filled) + strings.Repeat("░", 10-filled)
-
-			btnText := fmt.Sprintf("⏳ [%s] %d%% (%d/%d)", bar, percent, processed, total)
-			newKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData(btnText, "loading_status"),
-				),
-			)
-			editMarkup := tgbotapi.NewEditMessageReplyMarkup(session.ChatID, statusMsgID, newKeyboard)
-			bot.Send(editMarkup)
-		}
-	}
-
-	// عند الوصول لـ 100%، نقوم بحذف رسالة التقدم بالكامل
-	if statusMsgID != 0 {
-		bot.Request(tgbotapi.NewDeleteMessage(session.ChatID, statusMsgID))
-	}
-
-	// إرسال رسالة الإنجاز النهائية مع الرابط الدقيق
-	doneText := fmt.Sprintf("🎉 **تم نسخ الحزمة بالكامل بنجاح!**\n\n🏷 عنوان الحزمة: `%s`\n🔗 رابط الحزمة:\nhttps://t.me/addstickers/%s", session.UserCustomTitle, session.CreatedPackName)
-	doneMsg := tgbotapi.NewMessage(session.ChatID, doneText)
-	doneMsg.ParseMode = "Markdown"
-	bot.Send(doneMsg)
-
-	// مسح الجلسة والعودة للرئيسية
-	clearSession(userId)
-	sendHomeMenu(bot, session.ChatID, "")
+// randInt يولد عددًا عشوائيًا بين min و max.
+func randInt(min, max int) int {
+	return rand.Intn(max-min) + min
 }
 
-// دالة جلب كل ملصقات الحزمة وتحديد نوعها
-func fetchAllStickersFromSet(botToken, originalSetName string) ([]string, []string, string, error) {
-	getSetURL := fmt.Sprintf("https://api.telegram.org/bot%s/getStickerSet?name=%s", botToken, originalSetName)
-	resp, err := http.Get(getSetURL)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	defer resp.Body.Close()
-
-	var resStruct struct {
-		Ok     bool `json:"ok"`
-		Result struct {
-			Stickers []struct {
-				FileID     string `json:"file_id"`
-				Emoji      string `json:"emoji"`
-				IsVideo    bool   `json:"is_video"`
-				IsAnimated bool   `json:"is_animated"`
-			} `json:"stickers"`
-		} `json:"result"`
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&resStruct)
-	if err != nil || !resStruct.Ok || len(resStruct.Result.Stickers) == 0 {
-		return nil, nil, "", fmt.Errorf("empty set")
-	}
-
-	var fileIDs []string
-	var emojis []string
-	packType := "static" // Default
-
-	first := resStruct.Result.Stickers[0]
-	if first.IsVideo {
-		packType = "video"
-	} else if first.IsAnimated {
-		packType = "animated"
-	}
-
-	for _, s := range resStruct.Result.Stickers {
-		emoji := s.Emoji
-		if emoji == "" {
-			emoji = "⭐"
-		}
-		fileIDs = append(fileIDs, s.FileID)
-		emojis = append(emojis, emoji)
-	}
-
-	return fileIDs, emojis, packType, nil
+// generatePackName يولد اسم حزمة جديد بالصيغة المطلوبة.
+func generatePackName() string {
+	rand.Seed(time.Now().UnixNano())
+	num := randInt(100000, 999999)
+	return fmt.Sprintf("p%d_by_Cut88bot", num)
 }
 
-// دالة إنشاء الحزمة الجديدة بأول ملصق (نفس الهيكل الدقيق لتفادي 400)
-func createNewPackWithFirstSticker(botToken string, userID int64, newName, newTitle, packType, fileID, emoji string) error {
-	createURL := fmt.Sprintf("https://api.telegram.org/bot%s/createNewStickerSet", botToken)
-
-	createPayload := map[string]interface{}{
-		"user_id": userID,
-		"name":    newName,
-		"title":   newTitle,
+// getStickerSetByName يسترجع مجموعة الملصقات باستخدام الاسم.
+func getStickerSetByName(name string) (*tgbotapi.StickerSet, error) {
+	cfg := tgbotapi.GetStickerSetConfig{
+		Name: name,
 	}
-
-	if packType == "video" {
-		createPayload["video_sticker"] = map[string]interface{}{
-			"sticker":    fileID,
-			"emoji_list": []string{emoji},
-		}
-	} else if packType == "animated" {
-		createPayload["tgs_sticker"] = map[string]interface{}{
-			"sticker": fileID,
-		}
-		createPayload["emojis"] = emoji
-	} else {
-		createPayload["png_sticker"] = fileID
-		createPayload["emojis"] = emoji
-	}
-
-	bodyBytes, _ := json.Marshal(createPayload)
-	creResp, err := http.Post(createURL, "application/json", bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return err
-	}
-	defer creResp.Body.Close()
-
-	if creResp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(creResp.Body)
-		return fmt.Errorf("%s", string(respBody))
-	}
-	return nil
+	return bot.GetStickerSet(cfg)
 }
 
-// معالجة ضغطات الأزرار (Callbacks)
-func handleIncomingCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery, botToken string) {
-	chatId := query.Message.Chat.ID
-	userId := query.From.ID
-	data := query.Data
-
-	// للرد على زر التقدم حتى لا يبقى قيد التحميل
-	if data == "loading_status" {
-		bot.Request(tgbotapi.NewCallback(query.ID, "🔄 العملية جارية، يرجى الانتظار..."))
-		return
-	}
-	bot.Request(tgbotapi.NewCallback(query.ID, ""))
-
-	if data == "copy_static" || data == "copy_animated" {
-		mode := "static"
-		modeName := "ثابتة (PNG)"
-		if data == "copy_animated" {
-			mode = "animated"
-			modeName = "متحركة (TGS / Video)"
-		}
-
-		sessionsLock.Lock()
-		userSessions[userId] = &StickerPackSession{
-			Step: "awaiting_title",
-			Mode: mode,
-		}
-		sessionsLock.Unlock()
-
-		msg := tgbotapi.NewMessage(chatId, fmt.Sprintf("📝 أنت الآن في قسم نسخ الملصقات **%s**.\nأرسل الآن **اسم الحزمة** الذي تريده:", modeName))
-		msg.ParseMode = "Markdown"
-		bot.Send(msg)
-		return
+// createNewStickerSet ينشئ حزمة جديدة بالبيانات المحددة.
+func createNewStickerSet(userID int64, name, title, packType, fileID, emoji string) error {
+	cfg := tgbotapi.CreateNewStickerSetConfig{
+		UserID: userID,
+		Name:   name,
+		Title:  title,
+		Emojis: emoji,
 	}
 
-	if data == "my_packs" {
-		packsKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("✏️ تعديل عنوان حزمة", "edit_title"),
-				tgbotapi.NewInlineKeyboardButtonData("🗑 حذف ملصق من حزمة", "delete_sticker"),
-			),
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("🔙 رجوع للقائمة الرئيسية", "back_home"),
-			),
-		)
-		msg := tgbotapi.NewMessage(chatId, "📁 **قسم حزماتي (الإدارة الداخلية):**\nاختر العملية التي تريد تنفيذها:")
-		msg.ParseMode = "Markdown"
-		msg.ReplyMarkup = packsKeyboard
-		bot.Send(msg)
-		return
+	switch packType {
+	case "static":
+		cfg.PNGSticker = fileID
+	case "animated":
+		cfg.TGSSticker = fileID
+	case "video":
+		cfg.WebMSticker = fileID
+	default:
+		return fmt.Errorf("نوع حزمة غير معروف: %s", packType)
 	}
 
-	if data == "edit_title" {
-		msg := tgbotapi.NewMessage(chatId, "✏️ **لتعديل عنوان الحزمة:**\nأرسل اسم الحزمة أو رابطها متبوعاً بالعنوان الجديد.\n*(ميزة قيد التطوير)*")
-		msg.ParseMode = "Markdown"
-		bot.Send(msg)
-		return
-	}
-
-	if data == "delete_sticker" {
-		msg := tgbotapi.NewMessage(chatId, "🗑 **لحذف ملصق:**\nأرسل الملصق المراد حذفه مباشرة إلى البوت هنا لمعالجته.\n*(ميزة قيد التطوير)*")
-		msg.ParseMode = "Markdown"
-		bot.Send(msg)
-		return
-	}
-
-	if data == "back_home" {
-		clearSession(userId)
-		sendHomeMenu(bot, chatId, "")
-		return
-	}
+	_, err := bot.CreateNewStickerSet(cfg)
+	return err
 }
 
-// عرض القائمة الرئيسية
-func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+// addStickerToSet يضيف ملصقًا إلى حزمة موجودة.
+func addStickerToSet(userID int64, name, packType, fileID, emoji string) error {
+	cfg := tgbotapi.AddStickerToSetConfig{
+		UserID: userID,
+		Name:   name,
+		Emojis: emoji,
+	}
+
+	switch packType {
+	case "static":
+		cfg.PNGSticker = fileID
+	case "animated":
+		cfg.TGSSticker = fileID
+	case "video":
+		cfg.WebMSticker = fileID
+	default:
+		return fmt.Errorf("نوع حزمة غير معروف: %s", packType)
+	}
+
+	_, err := bot.AddStickerToSet(cfg)
+	return err
+}
+
+// ==================== دوال التعامل مع الرسائل والاستعلامات ====================
+
+// sendMainMenu يرسل القائمة الرئيسية للمستخدم.
+func sendMainMenu(chatID int64) error {
+	msg := tgbotapi.NewMessage(chatID, "مرحباً بك في بوت نسخ الملصقات! اختر نوع الحزمة التي تريد نسخها:")
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🖼 نسخ حزمة ملصقات ثابتة", "copy_static"),
 		),
@@ -451,20 +131,375 @@ func sendHomeMenu(bot *tgbotapi.BotAPI, chatID int64, firstName string) {
 			tgbotapi.NewInlineKeyboardButtonData("📁 حزماتي (إدارة الحزم)", "my_packs"),
 		),
 	)
-
-	welcomeText := "أهلاً بك! 👋\nاختر القسم المناسب لنسخ حزم الملصقات أدناه:"
-	if firstName != "" {
-		welcomeText = fmt.Sprintf("أهلاً بك يا %s! 👋\nاختر القسم المناسب لنسخ حزم الملصقات أدناه:", firstName)
-	}
-
-	msg := tgbotapi.NewMessage(chatID, welcomeText)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
+	_, err := bot.Send(msg)
+	return err
 }
 
-// مسح الجلسة بشكل آمن
-func clearSession(userId int64) {
-	sessionsLock.Lock()
-	delete(userSessions, userId)
-	sessionsLock.Unlock()
+// handleStart يعالج الأمر /start.
+func handleStart(update tgbotapi.Update) {
+	if update.Message == nil {
+		return
+	}
+	chatID := update.Message.Chat.ID
+	// تنظيف أي جلسة سابقة
+	mu.Lock()
+	delete(sessions, chatID)
+	mu.Unlock()
+
+	sendMainMenu(chatID)
+}
+
+// handleCallbackQuery يعالج النقرات على الأزرار.
+func handleCallbackQuery(update tgbotapi.Update) {
+	cb := update.CallbackQuery
+	if cb == nil {
+		return
+	}
+	chatID := cb.Message.Chat.ID
+	data := cb.Data
+
+	// الرد على الاستعلام لتجنب انتظار التحميل.
+	bot.Send(tgbotapi.NewCallback(cb.ID, ""))
+
+	switch data {
+	case "copy_static":
+		// تعيين نوع الحزمة وطلب العنوان
+		mu.Lock()
+		sessions[chatID] = &UserState{
+			Action:   "awaiting_title",
+			PackType: "static",
+		}
+		mu.Unlock()
+		msg := tgbotapi.NewMessage(chatID, "أرسل العنوان المخصص للحزمة الجديدة (سيتم إضافة العلامة المائية تلقائياً).")
+		bot.Send(msg)
+
+	case "copy_animated":
+		// نطلب عنوانًا، لكن سنحدد نوع الحزمة لاحقًا بناءً على الملصق المرسل؟
+		// لكن المستخدم اختار متحركة، لذا سنطلب عنوانًا وننتظر ملصقًا متحركًا.
+		mu.Lock()
+		sessions[chatID] = &UserState{
+			Action:   "awaiting_title",
+			PackType: "animated", // سيتم التحقق لاحقًا
+		}
+		mu.Unlock()
+		msg := tgbotapi.NewMessage(chatID, "أرسل العنوان المخصص للحزمة المتحركة (سيتم إضافة العلامة المائية تلقائياً).")
+		bot.Send(msg)
+
+	case "my_packs":
+		// عرض قائمة إدارة الحزم (تعليمات فقط)
+		menu := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("✏️ تعديل عنوان حزمة", "edit_title"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🗑 حذف ملصق من حزمة", "delete_sticker"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🔙 رجوع للقائمة الرئيسية", "main_menu"),
+			),
+		)
+		msg := tgbotapi.NewMessage(chatID, "اختر العملية المطلوبة:")
+		msg.ReplyMarkup = menu
+		bot.Send(msg)
+
+	case "edit_title", "delete_sticker":
+		// إرسال تعليمات نصية بسيطة.
+		var text string
+		if data == "edit_title" {
+			text = "لتعديل عنوان حزمة، استخدم الأمر /editpack <اسم_الحزمة> <العنوان_الجديد> (هذه الميزة قيد التطوير)."
+		} else {
+			text = "لحذف ملصق من حزمة، استخدم الأمر /delsticker <اسم_الحزمة> <معرف_الملصق> (هذه الميزة قيد التطوير)."
+		}
+		msg := tgbotapi.NewMessage(chatID, text)
+		bot.Send(msg)
+
+	case "main_menu":
+		sendMainMenu(chatID)
+
+	default:
+		// تجاهل
+	}
+}
+
+// handleMessage يعالج الرسائل النصية والملصقات.
+func handleMessage(update tgbotapi.Update) {
+	if update.Message == nil {
+		return
+	}
+	chatID := update.Message.Chat.ID
+
+	mu.RLock()
+	state, exists := sessions[chatID]
+	mu.RUnlock()
+
+	if !exists {
+		// إذا لم توجد جلسة، نرسل القائمة الرئيسية.
+		sendMainMenu(chatID)
+		return
+	}
+
+	// معالجة حسب الحالة
+	switch state.Action {
+	case "awaiting_title":
+		// ننتظر إرسال عنوان
+		if update.Message.Text == "" {
+			bot.Send(tgbotapi.NewMessage(chatID, "الرجاء إرسال نص العنوان."))
+			return
+		}
+		title := strings.TrimSpace(update.Message.Text)
+		if title == "" {
+			bot.Send(tgbotapi.NewMessage(chatID, "العنوان لا يمكن أن يكون فارغاً."))
+			return
+		}
+		// إضافة العلامة المائية
+		fullTitle := title + " | @I5I5Ie"
+		// حفظ العنوان وانتظار إرسال ملصق
+		mu.Lock()
+		state.Title = fullTitle
+		state.Action = "awaiting_sticker"
+		mu.Unlock()
+
+		msg := tgbotapi.NewMessage(chatID, "تم حفظ العنوان. الآن أرسل أي ملصق من الحزمة التي تريد نسخها (يمكنك إعادة توجيهه).")
+		bot.Send(msg)
+
+	case "awaiting_sticker":
+		// ننتظر ملصقًا
+		if update.Message.Sticker == nil {
+			bot.Send(tgbotapi.NewMessage(chatID, "الرجاء إرسال ملصق (Sticker) من الحزمة المطلوبة."))
+			return
+		}
+		sticker := update.Message.Sticker
+		setName := sticker.SetName
+		if setName == "" {
+			bot.Send(tgbotapi.NewMessage(chatID, "هذا الملصق ليس جزءًا من حزمة، الرجاء إرسال ملصق من حزمة صالحة."))
+			return
+		}
+
+		// التحقق من تطابق نوع الملصق مع النوع المطلوب
+		expectedType := state.PackType
+		var actualType string
+		if sticker.IsVideo {
+			actualType = "video"
+		} else if sticker.IsAnimated {
+			actualType = "animated"
+		} else {
+			actualType = "static"
+		}
+
+		if expectedType != actualType {
+			msg := fmt.Sprintf("لقد اخترت نسخ حزمة %s، لكن الملصق المرسل من نوع %s. الرجاء استخدام القسم المناسب.", expectedType, actualType)
+			bot.Send(tgbotapi.NewMessage(chatID, msg))
+			return
+		}
+
+		// جلب الحزمة الكاملة
+		set, err := getStickerSetByName(setName)
+		if err != nil {
+			log.Printf("خطأ في جلب الحزمة %s: %v", setName, err)
+			bot.Send(tgbotapi.NewMessage(chatID, "حدث خطأ أثناء جلب الحزمة. تأكد من أن الحزمة عامة وحاول مرة أخرى."))
+			return
+		}
+
+		// تخزين بيانات الحزمة
+		mu.Lock()
+		state.StickerSet = set
+		state.Stickers = set.Stickers
+		state.Index = 0
+		state.Action = "cloning"
+		mu.Unlock()
+
+		// بدء عملية النسخ
+		go clonePack(chatID)
+
+	case "cloning":
+		// أثناء النسخ، نرفض أي رسائل أخرى
+		bot.Send(tgbotapi.NewMessage(chatID, "الرجاء الانتظار حتى انتهاء عملية النسخ الحالية."))
+
+	default:
+		// حالة غير معروفة
+		mu.Lock()
+		delete(sessions, chatID)
+		mu.Unlock()
+		sendMainMenu(chatID)
+	}
+}
+
+// ==================== عملية النسخ ====================
+
+// clonePack تقوم بعملية النسخ الفعلية مع تحديث شريط التقدم.
+func clonePack(chatID int64) {
+	mu.RLock()
+	state, exists := sessions[chatID]
+	mu.RUnlock()
+	if !exists || state.Action != "cloning" {
+		return
+	}
+
+	userID := chatID
+	packName := generatePackName()
+	fullTitle := state.Title
+	packType := state.PackType
+	stickers := state.Stickers
+	total := len(stickers)
+
+	// إنشاء الحزمة بالملصق الأول
+	firstSticker := stickers[0]
+	emoji := firstSticker.Emoji
+	if emoji == "" {
+		emoji = "🤖" // إيموجي افتراضي
+	}
+	err := createNewStickerSet(userID, packName, fullTitle, packType, firstSticker.FileID, emoji)
+	if err != nil {
+		log.Printf("فشل إنشاء الحزمة: %v", err)
+		bot.Send(tgbotapi.NewMessage(chatID, "حدث خطأ أثناء إنشاء الحزمة: "+err.Error()))
+		mu.Lock()
+		delete(sessions, chatID)
+		mu.Unlock()
+		return
+	}
+
+	// إرسال رسالة التقدم الأولى
+	progressMsg := tgbotapi.NewMessage(chatID, "جاري معالجة ورفع الحزمة...")
+	btnText := fmt.Sprintf("⏳ [░░░░░░░░░░] 0%% (0/%d)", total)
+	btn := tgbotapi.NewInlineKeyboardButtonData(btnText, "progress_dummy")
+	row := tgbotapi.NewInlineKeyboardRow(btn)
+	markup := tgbotapi.NewInlineKeyboardMarkup(row)
+	progressMsg.ReplyMarkup = markup
+	sentMsg, err := bot.Send(progressMsg)
+	if err != nil {
+		log.Printf("فشل إرسال رسالة التقدم: %v", err)
+		// استمرار دون شريط تقدم
+	} else {
+		// تخزين معرف الرسالة لتحديثها
+		mu.Lock()
+		state.ProgressMsg.ChatID = sentMsg.Chat.ID
+		state.ProgressMsg.MsgID = sentMsg.MessageID
+		mu.Unlock()
+	}
+
+	// إضافة بقية الملصقات
+	for i := 1; i < total; i++ {
+		sticker := stickers[i]
+		emoji := sticker.Emoji
+		if emoji == "" {
+			emoji = "🤖"
+		}
+		err := addStickerToSet(userID, packName, packType, sticker.FileID, emoji)
+		if err != nil {
+			log.Printf("فشل إضافة ملصق %d: %v", i, err)
+			// نستمر في المحاولة
+		}
+
+		// تحديث شريط التقدم بعد كل إضافة
+		percent := int(float64(i+1) / float64(total) * 100)
+		progress := fmt.Sprintf("⏳ [%-10s] %d%% (%d/%d)", strings.Repeat("█", percent/10), percent, i+1, total)
+		updateProgress(chatID, progress)
+	}
+
+	// بعد الانتهاء من جميع الملصقات، حذف رسالة التقدم وإرسال النتيجة
+	// عند 100% نمسح الرسالة
+	deleteProgressMessage(chatID)
+
+	// إرسال رسالة النجاح
+	link := fmt.Sprintf("https://t.me/addstickers/%s", packName)
+	successMsg := fmt.Sprintf("✅ تم نسخ الحزمة بنجاح!\n\nالعنوان: %s\nالرابط: %s", fullTitle, link)
+	bot.Send(tgbotapi.NewMessage(chatID, successMsg))
+
+	// تنظيف الجلسة وإعادة القائمة الرئيسية
+	mu.Lock()
+	delete(sessions, chatID)
+	mu.Unlock()
+	sendMainMenu(chatID)
+}
+
+// updateProgress يقوم بتحديث زر التقدم.
+func updateProgress(chatID int64, newText string) {
+	mu.RLock()
+	state, exists := sessions[chatID]
+	mu.RUnlock()
+	if !exists || state.ProgressMsg.MsgID == 0 {
+		return
+	}
+
+	// إنشاء زر جديد بنفس البيانات الوهمية
+	btn := tgbotapi.NewInlineKeyboardButtonData(newText, "progress_dummy")
+	row := tgbotapi.NewInlineKeyboardRow(btn)
+	markup := tgbotapi.NewInlineKeyboardMarkup(row)
+
+	edit := tgbotapi.NewEditMessageReplyMarkup(state.ProgressMsg.ChatID, state.ProgressMsg.MsgID, markup)
+	_, err := bot.Send(edit)
+	if err != nil {
+		log.Printf("فشل تحديث شريط التقدم: %v", err)
+	}
+}
+
+// deleteProgressMessage يحذف رسالة التقدم.
+func deleteProgressMessage(chatID int64) {
+	mu.RLock()
+	state, exists := sessions[chatID]
+	mu.RUnlock()
+	if !exists || state.ProgressMsg.MsgID == 0 {
+		return
+	}
+
+	del := tgbotapi.NewDeleteMessage(state.ProgressMsg.ChatID, state.ProgressMsg.MsgID)
+	_, err := bot.Send(del)
+	if err != nil {
+		log.Printf("فشل حذف رسالة التقدم: %v", err)
+	}
+	// إعادة تعيين المعرفات
+	mu.Lock()
+	state.ProgressMsg.ChatID = 0
+	state.ProgressMsg.MsgID = 0
+	mu.Unlock()
+}
+
+// ==================== معالج الويب هوك ====================
+
+// Handler هو نقطة الدخول من Vercel.
+func Handler(w http.ResponseWriter, r *http.Request) {
+	// تهيئة البوت عند أول استدعاء (سيتم تهيئته مرة واحدة فقط بسبب المتغير العام)
+	if bot == nil {
+		token := os.Getenv("TELEGRAM_BOT_TOKEN")
+		if token == "" {
+			http.Error(w, "TELEGRAM_BOT_TOKEN not set", http.StatusInternalServerError)
+			return
+		}
+		var err error
+		bot, err = tgbotapi.NewBotAPI(token)
+		if err != nil {
+			log.Printf("فشل إنشاء البوت: %v", err)
+			http.Error(w, "Bot init failed", http.StatusInternalServerError)
+			return
+		}
+		bot.Debug = false // عيّن true للتطوير
+	}
+
+	// قراءة جسم الطلب
+	var update tgbotapi.Update
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		log.Printf("خطأ في فك تشفير التحديث: %v", err)
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	// معالجة التحديث حسب نوعه
+	if update.Message != nil {
+		if update.Message.IsCommand() {
+			switch update.Message.Command() {
+			case "start":
+				handleStart(update)
+			default:
+				// أوامر أخرى يمكن تجاهلها
+			}
+		} else {
+			handleMessage(update)
+		}
+	} else if update.CallbackQuery != nil {
+		handleCallbackQuery(update)
+	}
+
+	// الرد بنجاح
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "OK")
 }
